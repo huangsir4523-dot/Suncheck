@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Suncheck icon">
+  <rect width="512" height="512" rx="104" fill="#f7f7f4"/>
+  <circle cx="256" cy="242" r="86" fill="none" stroke="#111111" stroke-width="28"/>
+  <path d="M256 66v66M256 352v66M80 242h66M366 242h66M132 118l47 47M333 319l47 47M380 118l-47 47M179 319l-47 47" stroke="#111111" stroke-width="24" stroke-linecap="round"/>
+  <path d="M166 396c30 22 60 33 90 33s60-11 90-33" fill="none" stroke="#111111" stroke-width="24" stroke-linecap="round"/>
+</svg>
