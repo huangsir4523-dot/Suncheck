@@ -14,9 +14,13 @@ Version 1 intentionally has no login, backend, payment, AI chat, native iOS app,
 
 ```text
 Suncheck/
+  .github/
+    workflows/
+      deploy.yml
   .gitignore
   netlify.toml
   public/
+    404.html
     icons/
       suncheck-icon.svg
     _headers
@@ -83,13 +87,28 @@ Preview production build:
 npm run preview
 ```
 
-## Deployment
+## GitHub Pages Deployment
 
 Suncheck is a static PWA. The production build outputs plain files to `dist/`, so no backend server is required.
 
-Do not use `http://127.0.0.1:5173` on a phone. `127.0.0.1` always means "this device," so on an iPhone it points to the iPhone itself. To open Suncheck on iPhone or Android, deploy it and use the public HTTPS URL from Vercel or Netlify.
+This project is configured for a GitHub Pages project site at:
 
-Before deploying, verify locally:
+```text
+https://YOUR-GITHUB-USERNAME.github.io/Suncheck/
+```
+
+Do not use `http://127.0.0.1:5173` on a phone. `127.0.0.1` always means "this device," so on an iPhone it points to the iPhone itself. To open Suncheck on iPhone or Android, deploy it and use the public HTTPS GitHub Pages URL above.
+
+The important GitHub Pages settings are already in the project:
+
+- `vite.config.ts` uses `base: "/Suncheck/"`.
+- `public/manifest.webmanifest` uses `/Suncheck/` for `start_url`, `scope`, and icon paths.
+- `src/main.tsx` registers the service worker under the Vite base path.
+- `public/sw.js` caches the app shell under the service-worker scope.
+- `public/404.html` redirects unknown GitHub Pages paths back to `/Suncheck/`.
+- `.github/workflows/deploy.yml` builds and deploys `dist/` automatically.
+
+Before deploying, verify locally if you can:
 
 ```bash
 npm run build
@@ -103,33 +122,62 @@ npm.cmd run build
 
 The build also runs `scripts/generate-icons.mjs`, which creates the PNG PWA icons used by the manifest.
 
-### Deploy with Vercel
+### Deploy with GitHub Desktop
 
-1. Create a GitHub repository for this project and push the files.
-2. Go to Vercel and choose **Add New Project**.
-3. Import the GitHub repository.
-4. Use these settings:
-   - Framework preset: `Vite`
-   - Install command: `npm install`
-   - Build command: `npm run build`
-   - Output directory: `dist`
-5. Deploy.
-6. Open the generated `https://...vercel.app` URL on iPhone Safari or Android Chrome.
+1. Open GitHub Desktop.
+2. Open or add the local repository at `C:\Users\hxz\Documents\Suncheck`.
+3. Check that `node_modules/` and `dist/` are not listed as files to commit.
+4. Commit all project source changes with a message such as `Configure GitHub Pages deployment`.
+5. Click **Publish repository** if the repo is not on GitHub yet, or **Push origin** if it already exists.
 
-The included `vercel.json` sets the same build/output values and adds production headers for the manifest, service worker, and icons.
+### Enable GitHub Pages
 
-### Deploy with Netlify
+1. Open the `Suncheck` repository on GitHub in your browser.
+2. Go to **Settings**.
+3. In the left sidebar, click **Pages**.
+4. Under **Build and deployment**, set **Source** to **GitHub Actions**.
+5. Go to the **Actions** tab.
+6. Wait for the workflow named **Deploy to GitHub Pages** to finish.
+7. Open:
 
-1. Create a GitHub repository for this project and push the files.
-2. Go to Netlify and choose **Add new site** > **Import an existing project**.
-3. Import the GitHub repository.
-4. Use these settings:
-   - Build command: `npm run build`
-   - Publish directory: `dist`
-5. Deploy.
-6. Open the generated `https://...netlify.app` URL on iPhone Safari or Android Chrome.
+```text
+https://YOUR-GITHUB-USERNAME.github.io/Suncheck/
+```
 
-The included `netlify.toml`, `public/_headers`, and `public/_redirects` files keep static hosting behavior predictable.
+Replace `YOUR-GITHUB-USERNAME` with your actual GitHub username.
+
+### What to Commit
+
+Commit these folders and files:
+
+```text
+.github/
+public/
+scripts/
+src/
+.gitignore
+index.html
+netlify.toml
+package.json
+package-lock.json
+README.md
+tsconfig.json
+tsconfig.node.json
+vercel.json
+vite.config.ts
+```
+
+Do not commit these generated or local folders:
+
+```text
+node_modules/
+dist/
+.vite/
+.vercel/
+.netlify/
+```
+
+The existing Vercel and Netlify files are kept for future use, but GitHub Pages is now the recommended deployment path for this project.
 
 ### PWA Checks After Deployment
 
@@ -139,7 +187,7 @@ Use the deployed HTTPS URL, not localhost:
 - Android Chrome: open the URL and use the install prompt or browser menu > **Add to Home screen**.
 - Confirm the installed icon uses the Suncheck icon.
 - Confirm the app opens full-screen/standalone after installing.
-- Confirm location permission works. Browser geolocation generally requires HTTPS, which Vercel and Netlify provide automatically.
+- Confirm location permission works. Browser geolocation generally requires HTTPS, which GitHub Pages provides automatically.
 - Confirm the app still opens after toggling airplane mode once it has been loaded at least once.
 
 ### Production Notes

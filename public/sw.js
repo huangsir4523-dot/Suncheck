@@ -1,10 +1,12 @@
-const CACHE_NAME = "suncheck-shell-v1";
+const CACHE_NAME = "suncheck-shell-v2";
+const BASE_PATH = new URL(self.registration.scope).pathname;
+const assetUrl = (path) => `${BASE_PATH}${path.replace(/^\/+/, "")}`;
 const SHELL_ASSETS = [
-  "/",
-  "/manifest.webmanifest",
-  "/icons/suncheck-icon.svg",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png"
+  BASE_PATH,
+  assetUrl("manifest.webmanifest"),
+  assetUrl("icons/suncheck-icon.svg"),
+  assetUrl("icons/icon-192.png"),
+  assetUrl("icons/icon-512.png")
 ];
 
 self.addEventListener("install", (event) => {
@@ -30,7 +32,7 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(() => caches.match("/")));
+    event.respondWith(fetch(request).catch(() => caches.match(BASE_PATH)));
     return;
   }
 
