@@ -7,6 +7,7 @@ Suncheck is a mobile-first Web App / PWA that answers one daily question: do I n
 - React + TypeScript + Vite: small, stable, fast to develop, and easy to deploy as static files.
 - Browser APIs only: Geolocation, localStorage, fetch, service worker, and Web App Manifest.
 - Open-Meteo: free public weather, UV, and geocoding data with no custom backend or paid key.
+- BigDataCloud free client-side reverse geocoding: used only after the user taps **Use current location**, so GPS coordinates can be displayed as a nearby city name when possible.
 
 Version 1 intentionally has no login, backend, payment, AI chat, native iOS app, Xcode, TestFlight, or Apple Developer dependency.
 
@@ -195,7 +196,8 @@ Use the deployed HTTPS URL, not localhost:
 - Required Node version: `^20.19.0 || >=22.12.0`, declared in `package.json`.
 - No environment variables are required.
 - No paid API keys are required.
-- Weather, UV, and geocoding requests go directly from the browser to Open-Meteo.
+- Weather, UV, and manual city search requests go directly from the browser to Open-Meteo.
+- Current-location city lookup goes directly from the browser to BigDataCloud after geolocation succeeds.
 - User settings, favorites, location choices, and sunscreen records stay in browser localStorage.
 
 ## Recommendation Algorithm
@@ -228,7 +230,7 @@ Weather is displayed and may appear in explanatory text, but it does not overrid
 
 ## Privacy
 
-No account is required. Suncheck has no custom server in version 1. Location choices, favorites, language, theme, sensitivity, sunscreen type, and sunscreen records are stored locally in the browser.
+No account is required. Suncheck has no custom server in version 1. Location choices, favorites, language, theme, sensitivity, sunscreen type, and sunscreen records are stored locally in the browser. If the user taps **Use current location**, the browser asks for permission and the resulting coordinates are sent directly to Open-Meteo for UV/weather and to BigDataCloud for nearby-city lookup.
 
 ## Testing Checklist
 

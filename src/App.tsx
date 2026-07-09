@@ -14,6 +14,7 @@ import { getSunscreenRecommendation } from "./domain/recommendation";
 import {
   fetchWeather,
   locationFromGeolocation,
+  reverseGeocodeLocation,
   savedLocationFromSearch,
   searchCities
 } from "./services/openMeteoProvider";
@@ -46,7 +47,7 @@ type Page = "home" | "location" | "settings";
 
 function formatLocation(location: SavedLocation | null, language: Language): string {
   if (!location) return t(language, "changeLocation");
-  if (location.source === "gps" || location.name === "GPS") return t(language, "currentLocation");
+  if (location.source === "gps" && location.name === "GPS") return t(language, "currentLocation");
   return [location.name, location.admin1, location.country].filter(Boolean).join(", ");
 }
 
@@ -72,7 +73,7 @@ function App() {
   const [location, setLocation] = useState<SavedLocation | null>(() => loadLastLocation());
   const [log, setLog] = useState<DailySunscreenLog>(() => loadTodayLog());
   const [weather, setWeather] = useState<WeatherSnapshot | null>(null);
-  const [page, setPage] = useState<Page>("home");
+  const [page, setPage] = useState<Page>(() => (location ? "home" : "location"));
   const [error, setError] = useState<AppError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [isLocating, setIsLocating] = useState(false);
@@ -115,37 +116,102 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!location) {
-      void useCurrentLocation();
+    if (location) {
+      void refreshWeather(location);
     }
   }, []);
-
-  useEffect(() => {
-    if (location) void refreshWeather(location);
-  }, [location?.id]);
 
   async function refreshWeather(nextLocation = location) {
     if (!nextLocation) return;
     if (!navigator.onLine) {
+      console.warn("[Suncheck] Weather refresh skipped: browser is offline");
       setError("offline");
       return;
     }
     setIsWeatherLoading(true);
     setError(null);
     try {
+      console.info("[Suncheck] Fetching UV/weather", {
+        latitude: nextLocation.latitude,
+        longitude: nextLocation.longitude,
+        label: nextLocation.name
+      });
       const nextWeather = await fetchWeather(nextLocation);
       setWeather(nextWeather);
       if (nextWeather.uvIndex === null) setError("missingUv");
-    } catch {
+      console.info("[Suncheck] UV/weather loaded", {
+        uvIndex: nextWeather.uvIndex,
+        weatherCode: nextWeather.weatherCode
+      });
+    } catch (weatherError) {
+      console.error("[Suncheck] UV/weather request failed", weatherError);
       setError(navigator.onLine ? "apiUnavailable" : "offline");
     } finally {
       setIsWeatherLoading(false);
     }
   }
 
-  async function useCurrentLocation() {
+  function geolocationErrorToAppError(geoError: GeolocationPositionError): AppError {
+    if (geoError.code === geoError.PERMISSION_DENIED) return "geolocationDenied";
+    if (geoError.code === geoError.POSITION_UNAVAILABLE) return "geolocationUnavailable";
+    if (geoError.code === geoError.TIMEOUT) return "geolocationTimeout";
+    return "geolocationUnavailable";
+  }
+
+  async function handleGeolocationSuccess(position: GeolocationPosition) {
+    const gps = locationFromGeolocation(position);
+    console.info("[Suncheck] Geolocation succeeded", {
+      latitude: gps.latitude,
+      longitude: gps.longitude,
+      accuracy: position.coords.accuracy
+    });
+
+    setLocation(gps);
+    saveLastLocation(gps);
+    setPage("home");
+    setError(null);
+    setIsWeatherLoading(true);
+
+    const [weatherResult, reverseResult] = await Promise.allSettled([
+      fetchWeather(gps),
+      reverseGeocodeLocation(gps, language)
+    ]);
+
+    if (reverseResult.status === "fulfilled" && reverseResult.value) {
+      console.info("[Suncheck] Reverse geocoding succeeded", {
+        label: reverseResult.value.name,
+        admin1: reverseResult.value.admin1,
+        country: reverseResult.value.country
+      });
+      setLocation(reverseResult.value);
+      saveLastLocation(reverseResult.value);
+    } else if (reverseResult.status === "rejected") {
+      console.warn("[Suncheck] Reverse geocoding failed; keeping coordinate-based current location", reverseResult.reason);
+    } else {
+      console.info("[Suncheck] Reverse geocoding returned no nearby city; keeping coordinate-based current location");
+    }
+
+    if (weatherResult.status === "fulfilled") {
+      setWeather(weatherResult.value);
+      if (weatherResult.value.uvIndex === null) setError("missingUv");
+      console.info("[Suncheck] UV/weather loaded after geolocation", {
+        uvIndex: weatherResult.value.uvIndex,
+        weatherCode: weatherResult.value.weatherCode
+      });
+    } else {
+      console.error("[Suncheck] UV/weather request failed after geolocation", weatherResult.reason);
+      setError(navigator.onLine ? "apiUnavailable" : "offline");
+    }
+
+    setIsWeatherLoading(false);
+    setIsLocating(false);
+  }
+
+  function useCurrentLocation() {
+    console.info("[Suncheck] Use current location clicked");
     if (!("geolocation" in navigator)) {
-      setError("geolocationUnavailable");
+      console.warn("[Suncheck] Geolocation is not supported by this browser");
+      setError("geolocationUnsupported");
       setPage("location");
       return;
     }
@@ -153,17 +219,20 @@ function App() {
     setError(null);
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const gps = locationFromGeolocation(position);
-        setLocation(gps);
-        saveLastLocation(gps);
-        setIsLocating(false);
+        void handleGeolocationSuccess(position);
       },
       (geoError) => {
-        setError(geoError.code === geoError.PERMISSION_DENIED ? "geolocationDenied" : "geolocationUnavailable");
+        const appError = geolocationErrorToAppError(geoError);
+        console.warn("[Suncheck] Geolocation failed", {
+          code: geoError.code,
+          message: geoError.message,
+          mappedError: appError
+        });
+        setError(appError);
         setPage("location");
         setIsLocating(false);
       },
-      { enableHighAccuracy: false, maximumAge: 15 * 60 * 1000, timeout: 12000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 }
     );
   }
 
@@ -171,6 +240,7 @@ function App() {
     setLocation(next);
     saveLastLocation(next);
     setPage("home");
+    void refreshWeather(next);
   }
 
   function addFavorite() {
@@ -248,7 +318,7 @@ function App() {
             isLocating={isLocating}
             onChooseLocation={chooseLocation}
             onRemoveFavorite={removeFavorite}
-            onUseCurrentLocation={() => void useCurrentLocation()}
+            onUseCurrentLocation={useCurrentLocation}
           />
         ) : null}
 
@@ -546,9 +616,10 @@ function LocationPage({
     <div className="page">
       <section className="plain-section">
         <h1>{t(language, "location")}</h1>
-        <button className="wide-button" type="button" onClick={onUseCurrentLocation}>
+        <button className="wide-button" type="button" onClick={onUseCurrentLocation} disabled={isLocating} aria-busy={isLocating}>
           {isLocating ? t(language, "loadingLocation") : t(language, "useCurrentLocation")}
         </button>
+        {isLocating ? <p className="muted">{t(language, "loadingLocation")}</p> : null}
         <p className="muted">{formatLocation(location, language)}</p>
       </section>
 

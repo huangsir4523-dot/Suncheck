@@ -2,6 +2,7 @@ import type { Language, SavedLocation, SearchResult, UvPoint, WeatherSnapshot } 
 
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
+const REVERSE_GEOCODING_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client";
 
 interface ForecastResponse {
   timezone?: string;
@@ -26,6 +27,16 @@ interface GeocodingResponse {
     latitude: number;
     longitude: number;
   }>;
+}
+
+interface ReverseGeocodingResponse {
+  city?: string;
+  locality?: string;
+  principalSubdivision?: string;
+  countryName?: string;
+  latitude?: number;
+  longitude?: number;
+  lookupSource?: string;
 }
 
 function assertOk(response: Response): Response {
@@ -92,6 +103,26 @@ export async function searchCities(query: string, language: Language): Promise<S
       longitude: result.longitude
     })) ?? []
   );
+}
+
+export async function reverseGeocodeLocation(location: SavedLocation, language: Language): Promise<SavedLocation | null> {
+  const url = new URL(REVERSE_GEOCODING_URL);
+  url.searchParams.set("latitude", String(location.latitude));
+  url.searchParams.set("longitude", String(location.longitude));
+  url.searchParams.set("localityLanguage", language === "zh" ? "zh" : "en");
+
+  const data = (await fetch(url).then(assertOk).then((response) => response.json())) as ReverseGeocodingResponse;
+  const cityName = data.city || data.locality || data.principalSubdivision;
+
+  if (!cityName) return null;
+
+  return {
+    ...location,
+    name: cityName,
+    admin1: data.principalSubdivision,
+    country: data.countryName,
+    source: "gps"
+  };
 }
 
 export function locationFromGeolocation(position: GeolocationPosition): SavedLocation {

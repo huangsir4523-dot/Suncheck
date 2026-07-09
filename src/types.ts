@@ -85,6 +85,8 @@ export interface SearchResult {
 export type AppError =
   | "geolocationDenied"
   | "geolocationUnavailable"
+  | "geolocationTimeout"
+  | "geolocationUnsupported"
   | "cityNotFound"
   | "apiUnavailable"
   | "offline"
