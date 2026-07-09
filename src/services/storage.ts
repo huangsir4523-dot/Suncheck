@@ -1,4 +1,10 @@
 import { detectLanguage } from "../i18n";
+import {
+  sanitizeDailyLog,
+  sanitizeExposure,
+  sanitizeLocation,
+  sanitizeSettings
+} from "../security/validation";
 import type { DailySunscreenLog, ExposureContext, SavedLocation, SunscreenEvent, UserSettings } from "../types";
 
 const SETTINGS_KEY = "suncheck:settings";
@@ -21,12 +27,12 @@ export const defaultExposure: ExposureContext = {
   sweatingOrSwimming: false
 };
 
-function readJson<T>(key: string, fallback: T): T {
+function readJson(key: string): unknown {
   try {
     const raw = localStorage.getItem(key);
-    return raw ? ({ ...fallback, ...JSON.parse(raw) } as T) : fallback;
+    return raw ? JSON.parse(raw) : null;
   } catch {
-    return fallback;
+    return null;
   }
 }
 
@@ -42,58 +48,65 @@ export function todayKey(date = new Date()): string {
 }
 
 export function loadSettings(): UserSettings {
-  return readJson<UserSettings>(SETTINGS_KEY, defaultSettings);
+  return sanitizeSettings(readJson(SETTINGS_KEY), defaultSettings);
 }
 
 export function saveSettings(settings: UserSettings): void {
-  writeJson(SETTINGS_KEY, settings);
+  writeJson(SETTINGS_KEY, sanitizeSettings(settings, defaultSettings));
 }
 
 export function loadExposure(): ExposureContext {
-  return readJson<ExposureContext>(EXPOSURE_KEY, defaultExposure);
+  return sanitizeExposure(readJson(EXPOSURE_KEY), defaultExposure);
 }
 
 export function saveExposure(exposure: ExposureContext): void {
-  writeJson(EXPOSURE_KEY, exposure);
+  writeJson(EXPOSURE_KEY, sanitizeExposure(exposure, defaultExposure));
 }
 
 export function loadFavorites(): SavedLocation[] {
   try {
-    return JSON.parse(localStorage.getItem(FAVORITES_KEY) ?? "[]") as SavedLocation[];
+    const raw = JSON.parse(localStorage.getItem(FAVORITES_KEY) ?? "[]") as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw.map(sanitizeLocation).filter((location): location is SavedLocation => Boolean(location)).slice(0, 3);
   } catch {
     return [];
   }
 }
 
 export function saveFavorites(favorites: SavedLocation[]): void {
-  writeJson(FAVORITES_KEY, favorites.slice(0, 3));
+  writeJson(
+    FAVORITES_KEY,
+    favorites.map(sanitizeLocation).filter((location): location is SavedLocation => Boolean(location)).slice(0, 3)
+  );
 }
 
 export function loadLastLocation(): SavedLocation | null {
   try {
     const raw = localStorage.getItem(LOCATION_KEY);
-    return raw ? (JSON.parse(raw) as SavedLocation) : null;
+    return raw ? sanitizeLocation(JSON.parse(raw) as unknown) : null;
   } catch {
     return null;
   }
 }
 
 export function saveLastLocation(location: SavedLocation): void {
-  writeJson(LOCATION_KEY, location);
+  const safeLocation = sanitizeLocation(location);
+  if (safeLocation) writeJson(LOCATION_KEY, safeLocation);
 }
 
 export function loadTodayLog(date = new Date()): DailySunscreenLog {
   const key = todayKey(date);
+  const fallback = { date: key, events: [] };
   try {
     const raw = localStorage.getItem(`${LOG_PREFIX}${key}`);
-    return raw ? (JSON.parse(raw) as DailySunscreenLog) : { date: key, events: [] };
+    return raw ? sanitizeDailyLog(JSON.parse(raw) as unknown, fallback) : fallback;
   } catch {
-    return { date: key, events: [] };
+    return fallback;
   }
 }
 
 export function saveTodayLog(log: DailySunscreenLog): void {
-  writeJson(`${LOG_PREFIX}${log.date}`, log);
+  writeJson(`${LOG_PREFIX}${log.date}`, sanitizeDailyLog(log, { date: log.date, events: [] }));
 }
 
 export function addSunscreenEvent(date = new Date()): DailySunscreenLog {

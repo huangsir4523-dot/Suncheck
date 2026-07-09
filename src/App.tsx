@@ -18,6 +18,8 @@ import {
   savedLocationFromSearch,
   searchCities
 } from "./services/openMeteoProvider";
+import { INJECTION_TEST_STRINGS, isSafeDisplayText, safeCityInput, safeDisplayText } from "./security/sanitize";
+import { sanitizeLocation } from "./security/validation";
 import {
   addSunscreenEvent,
   clearTodayLog,
@@ -48,7 +50,7 @@ type Page = "home" | "location" | "settings";
 function formatLocation(location: SavedLocation | null, language: Language): string {
   if (!location) return t(language, "changeLocation");
   if (location.source === "gps" && location.name === "GPS") return t(language, "currentLocation");
-  return [location.name, location.admin1, location.country].filter(Boolean).join(", ");
+  return [location.name, location.admin1, location.country].map(safeDisplayText).filter(Boolean).join(", ");
 }
 
 function formatTime(date: Date, language: Language): string {
@@ -145,7 +147,8 @@ function App() {
       });
     } catch (weatherError) {
       console.error("[Suncheck] UV/weather request failed", weatherError);
-      setError(navigator.onLine ? "apiUnavailable" : "offline");
+      const isInvalidLocation = weatherError instanceof Error && weatherError.message.includes("Invalid location");
+      setError(isInvalidLocation ? "invalidLocationData" : navigator.onLine ? "apiUnavailable" : "offline");
     } finally {
       setIsWeatherLoading(false);
     }
@@ -159,7 +162,16 @@ function App() {
   }
 
   async function handleGeolocationSuccess(position: GeolocationPosition) {
-    const gps = locationFromGeolocation(position);
+    let gps: SavedLocation;
+    try {
+      gps = locationFromGeolocation(position);
+    } catch (locationError) {
+      console.error("[Suncheck] Browser returned invalid geolocation coordinates", locationError);
+      setError("invalidLocationData");
+      setPage("location");
+      setIsLocating(false);
+      return;
+    }
     console.info("[Suncheck] Geolocation succeeded", {
       latitude: gps.latitude,
       longitude: gps.longitude,
@@ -200,7 +212,9 @@ function App() {
       });
     } else {
       console.error("[Suncheck] UV/weather request failed after geolocation", weatherResult.reason);
-      setError(navigator.onLine ? "apiUnavailable" : "offline");
+      const isInvalidLocation =
+        weatherResult.reason instanceof Error && weatherResult.reason.message.includes("Invalid location");
+      setError(isInvalidLocation ? "invalidLocationData" : navigator.onLine ? "apiUnavailable" : "offline");
     }
 
     setIsWeatherLoading(false);
@@ -237,10 +251,17 @@ function App() {
   }
 
   function chooseLocation(next: SavedLocation) {
-    setLocation(next);
-    saveLastLocation(next);
-    setPage("home");
-    void refreshWeather(next);
+    try {
+      const safeLocation = sanitizeLocation(next);
+      if (!safeLocation) throw new Error("Invalid location data");
+      setLocation(safeLocation);
+      saveLastLocation(safeLocation);
+      setPage("home");
+      void refreshWeather(safeLocation);
+    } catch (locationError) {
+      console.error("[Suncheck] Rejected invalid selected location", locationError);
+      setError("invalidLocationData");
+    }
   }
 
   function addFavorite() {
@@ -333,6 +354,7 @@ function App() {
               window.setTimeout(() => setNotice(null), 2200);
             }}
             onUpdateSettings={updateSettings}
+            showSecurityLab={import.meta.env.DEV}
           />
         ) : null}
       </main>
@@ -599,14 +621,23 @@ function LocationPage({
 
   async function submitSearch(event: React.FormEvent) {
     event.preventDefault();
+    const safeQuery = safeCityInput(query);
+    setQuery(safeQuery);
+    if (!safeQuery) {
+      setResults([]);
+      setSearchError("cityNotFound");
+      return;
+    }
     setSearchError(null);
     setIsSearching(true);
     try {
-      const nextResults = await searchCities(query, language);
+      const nextResults = await searchCities(safeQuery, language);
       setResults(nextResults);
       if (nextResults.length === 0) setSearchError("cityNotFound");
-    } catch {
-      setSearchError(navigator.onLine ? "apiUnavailable" : "offline");
+    } catch (searchError) {
+      console.error("[Suncheck] City search failed", searchError);
+      const isInvalidLocation = searchError instanceof Error && searchError.message.includes("Invalid location");
+      setSearchError(isInvalidLocation ? "invalidLocationData" : navigator.onLine ? "apiUnavailable" : "offline");
     } finally {
       setIsSearching(false);
     }
@@ -629,6 +660,7 @@ function LocationPage({
           <input
             aria-label={t(language, "cityPlaceholder")}
             placeholder={t(language, "cityPlaceholder")}
+            maxLength={80}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -638,8 +670,8 @@ function LocationPage({
         <div className="list">
           {results.map((result) => (
             <button key={result.id} type="button" onClick={() => onChooseLocation(savedLocationFromSearch(result))}>
-              <strong>{result.name}</strong>
-              <span>{[result.admin1, result.country].filter(Boolean).join(", ")}</span>
+              <strong>{safeDisplayText(result.name)}</strong>
+              <span>{[result.admin1, result.country].map(safeDisplayText).filter(Boolean).join(", ")}</span>
             </button>
           ))}
         </div>
@@ -671,9 +703,10 @@ interface SettingsPageProps {
   settings: UserSettings;
   onClearHistory: () => void;
   onUpdateSettings: (patch: Partial<UserSettings>) => void;
+  showSecurityLab: boolean;
 }
 
-function SettingsPage({ language, log, settings, onClearHistory, onUpdateSettings }: SettingsPageProps) {
+function SettingsPage({ language, log, settings, onClearHistory, onUpdateSettings, showSecurityLab }: SettingsPageProps) {
   return (
     <div className="page">
       <section className="plain-section">
@@ -746,7 +779,46 @@ function SettingsPage({ language, log, settings, onClearHistory, onUpdateSetting
         <p>{t(language, "installHint")}</p>
         <p className="muted">{t(language, "attribution")}</p>
       </section>
+
+      {showSecurityLab ? <SecurityLab /> : null}
     </div>
+  );
+}
+
+function SecurityLab() {
+  const [customInput, setCustomInput] = useState("");
+  const samples = customInput ? [customInput, ...INJECTION_TEST_STRINGS] : [...INJECTION_TEST_STRINGS];
+
+  return (
+    <section className="plain-section security-lab">
+      <h2>Security Lab</h2>
+      <p className="muted">
+        Development-only text checks. Inputs are rendered as plain React text and are never executed.
+      </p>
+      <input
+        aria-label="Security Lab custom input"
+        placeholder="Try a city-like injection string"
+        value={customInput}
+        onChange={(event) => setCustomInput(event.target.value)}
+      />
+      <div className="security-list">
+        {samples.map((rawInput, index) => {
+          const cityInput = safeCityInput(rawInput);
+          const displayText = safeDisplayText(rawInput);
+          return (
+            <div className="security-item" key={`${rawInput}-${index}`}>
+              <span>Raw</span>
+              <code>{rawInput}</code>
+              <span>City input</span>
+              <code>{cityInput}</code>
+              <span>Display</span>
+              <code>{displayText}</code>
+              <strong>{isSafeDisplayText(displayText) ? "Safe for plain-text display" : "Rejected / empty"}</strong>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

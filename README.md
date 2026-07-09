@@ -35,7 +35,13 @@ Suncheck/
       recommendation.ts
     services/
       openMeteoProvider.ts
+      openMeteoProvider.test.ts
       storage.ts
+      storage.test.ts
+    security/
+      sanitize.ts
+      sanitize.test.tsx
+      validation.ts
     App.tsx
     i18n.ts
     main.tsx
@@ -86,6 +92,18 @@ Preview production build:
 
 ```bash
 npm run preview
+```
+
+Run automated tests:
+
+```bash
+npm run test
+```
+
+Run the defensive injection/security test suite:
+
+```bash
+npm run security:test
 ```
 
 ## GitHub Pages Deployment
@@ -199,6 +217,33 @@ Use the deployed HTTPS URL, not localhost:
 - Weather, UV, and manual city search requests go directly from the browser to Open-Meteo.
 - Current-location city lookup goes directly from the browser to BigDataCloud after geolocation succeeds.
 - User settings, favorites, location choices, and sunscreen records stay in browser localStorage.
+
+## Defensive Injection Test Experiment
+
+This repository includes a small defensive test suite for Suncheck only. It is meant to verify that this app handles malicious-looking text safely. Do not use it to target third-party sites or services.
+
+Run:
+
+```bash
+npm run security:test
+```
+
+The experiment checks:
+
+- Manual city input is trimmed, control characters are removed, and input is capped at 80 characters.
+- City search uses `URLSearchParams`, so user input is encoded before being sent to the geocoding API.
+- API-returned city, region, and country names are normalized for plain-text display.
+- HTML-like markers such as `<script>`, `<img>`, and `<svg>` are neutralized for display text.
+- Event-handler-looking fragments such as `onerror=` and `onload=` are neutralized in display text.
+- `javascript:` text is neutralized for display.
+- Latitude and longitude values are rejected if missing, `NaN`, `Infinity`, or outside valid ranges.
+- Malformed UV/weather values fall back to `null` instead of crashing the app.
+- Corrupted localStorage settings, favorites, last location, and sunscreen history recover to safe defaults or filtered data.
+- Source files are checked to ensure `dangerouslySetInnerHTML` is not used.
+
+In development mode, Settings includes a small **Security Lab** panel. It runs the same harmless injection strings through Suncheck's city input and display sanitizers and shows raw input, sanitized output, and whether the text is considered safe for plain-text display. The lab is hidden from production builds.
+
+These checks do not replace a professional security review. They cover basic client-side text injection, malformed location data, malformed weather data, and localStorage poisoning. They do not cover server-side vulnerabilities, dependency supply-chain risk, browser zero-days, CSP enforcement, or third-party API compromise.
 
 ## Recommendation Algorithm
 

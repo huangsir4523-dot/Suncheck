@@ -88,6 +88,7 @@ export type AppError =
   | "geolocationTimeout"
   | "geolocationUnsupported"
   | "cityNotFound"
+  | "invalidLocationData"
   | "apiUnavailable"
   | "offline"
   | "missingUv";

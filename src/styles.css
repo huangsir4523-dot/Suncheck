@@ -502,6 +502,15 @@ h2 {
   color: var(--text);
 }
 
+.security-lab input {
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
 .search-form button {
   padding: 0 14px;
 }
@@ -568,6 +577,30 @@ h2 {
 .about p {
   color: var(--muted);
   line-height: 1.5;
+}
+
+.security-list {
+  display: grid;
+  gap: 10px;
+}
+
+.security-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.security-item span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.security-item code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .tabbar {
