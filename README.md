@@ -9,6 +9,16 @@ Suncheck is a mobile-first Web App / PWA that answers one daily question: do I n
 - Open-Meteo: free public weather, UV, and geocoding data with no custom backend or paid key.
 - BigDataCloud free client-side reverse geocoding: used only after the user taps **Use current location**, so GPS coordinates can be displayed as a nearby city name when possible.
 
+## Open-source Research Notes
+
+The July 2026 feature update reviewed several related GitHub projects before extending Suncheck:
+
+- [jondcallahan/sunburntimer](https://github.com/jondcallahan/sunburntimer) is the closest functional match. It combines React, TypeScript, Open-Meteo, skin sensitivity, sunscreen, activity context, and hourly UV charts. Its README says MIT, but the repository does not currently expose a verifiable license file, so Suncheck uses only the high-level product ideas and does not copy its code.
+- [t1gr0u/uv-index-card](https://github.com/t1gr0u/uv-index-card) is an MIT-licensed Home Assistant card with clear UV risk bands and multilingual presentation.
+- [filipnet/haos-uv-index](https://github.com/filipnet/haos-uv-index) is BSD-3-Clause licensed and pairs UV categories with concise protection actions based on WHO guidance.
+
+The resulting Suncheck implementation is original to this repository. It adds a tested 24-hour UV summary, peak time, protection window, context-aware protection checklist, timezone-safe remote-city forecasts, and a five-band hourly UV chart. The category thresholds follow the [WHO UV Index guidance](https://www.who.int/news-room/questions-and-answers/item/radiation-the-ultraviolet-(uv)-index); Suncheck remains a daily guidance tool, not a medical or burn-time calculator.
+
 Version 1 intentionally has no login, backend, payment, AI chat, native iOS app, Xcode, TestFlight, or Apple Developer dependency.
 
 ## Project Structure

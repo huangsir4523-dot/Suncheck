@@ -11,8 +11,19 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker
-      .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
-      .catch(() => undefined);
+    if (import.meta.env.PROD) {
+      navigator.serviceWorker
+        .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
+        .catch(() => undefined);
+      return;
+    }
+
+    void navigator.serviceWorker.getRegistrations().then((registrations) => {
+      for (const registration of registrations) {
+        if (new URL(registration.scope).pathname.startsWith(import.meta.env.BASE_URL)) {
+          void registration.unregister();
+        }
+      }
+    });
   });
 }

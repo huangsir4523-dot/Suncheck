@@ -107,4 +107,28 @@ describe("Open-Meteo provider hardening", () => {
     expect(weather.temperatureC).toBeNull();
     expect(weather.hourlyUv[0].uvIndex).toBeNull();
   });
+
+  it("requests timezone-safe timestamps and converts them to ISO instants", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        timezone: "Asia/Shanghai",
+        current: { uv_index: 5.2 },
+        hourly: { time: [1784649600], uv_index: [4.8] }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const weather = await fetchWeather({
+      id: "beijing",
+      name: "Beijing",
+      latitude: 39.9042,
+      longitude: 116.4074,
+      source: "manual"
+    });
+
+    const url = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(url.searchParams.get("timeformat")).toBe("unixtime");
+    expect(weather.timezone).toBe("Asia/Shanghai");
+    expect(weather.hourlyUv[0].time).toBe("2026-07-21T16:00:00.000Z");
+  });
 });

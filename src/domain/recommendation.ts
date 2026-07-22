@@ -25,6 +25,7 @@ export function getSunscreenRecommendation(input: RecommendationInput): Recommen
   const uv = input.uvIndex;
   const { context, settings } = input;
   const expected = context.expectedOutdoorMinutes;
+  const uvRequiresProtection = uv === null || uv >= 2.5;
 
   let score = 0;
   if (uv === null) score += 2.6;
@@ -38,14 +39,14 @@ export function getSunscreenRecommendation(input: RecommendationInput): Recommen
   if (context.place === "indoor" && context.nearWindow) score += 0.8;
   if (context.place === "indoor" && !context.nearWindow) score -= 1.8;
 
-  if (expected >= 30) score += 0.7;
-  if (expected >= 60) score += 0.5;
-  if (expected >= 120) score += 0.4;
+  if (uvRequiresProtection && expected >= 30) score += 0.7;
+  if (uvRequiresProtection && expected >= 60) score += 0.5;
+  if (uvRequiresProtection && expected >= 120) score += 0.4;
   if (context.place === "outdoor" && expected >= 15 && uv !== null && uv >= 2.5) score += 0.5;
 
-  if (settings.sensitivity === "tans") score += 0.6;
-  if (settings.sensitivity === "burns") score += 0.9;
-  if (context.sweatingOrSwimming) score += 0.7;
+  if (uvRequiresProtection && settings.sensitivity === "tans") score += 0.6;
+  if (uvRequiresProtection && settings.sensitivity === "burns") score += 0.9;
+  if (uvRequiresProtection && context.sweatingOrSwimming) score += 0.7;
 
   score = Math.max(0, score);
   const risk = riskFromScore(score, uv);

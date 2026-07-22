@@ -8,6 +8,7 @@ const REVERSE_GEOCODING_URL = "https://api.bigdatacloud.net/data/reverse-geocode
 
 interface ForecastResponse {
   timezone?: string;
+  utc_offset_seconds?: number;
   current?: {
     time?: string;
     temperature_2m?: number;
@@ -15,7 +16,7 @@ interface ForecastResponse {
     uv_index?: number;
   };
   hourly?: {
-    time?: string[];
+    time?: Array<string | number>;
     uv_index?: Array<number | null>;
   };
 }
@@ -64,6 +65,15 @@ function nearestUv(hourly: UvPoint[], now = new Date()): number | null {
   return sanitizeUvValue(nearest?.point.uvIndex);
 }
 
+function forecastTime(value: string | number): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value * 1000).toISOString();
+  }
+  if (typeof value !== "string" || !value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 export async function fetchWeather(location: SavedLocation): Promise<WeatherSnapshot> {
   assertValidLocation(location);
   const url = new URL(FORECAST_URL);
@@ -73,16 +83,17 @@ export async function fetchWeather(location: SavedLocation): Promise<WeatherSnap
   url.searchParams.set("hourly", "uv_index");
   url.searchParams.set("forecast_days", "2");
   url.searchParams.set("timezone", "auto");
+  url.searchParams.set("timeformat", "unixtime");
 
   const data = (await fetch(url).then(assertOk).then((response) => response.json())) as ForecastResponse;
   const times = data.hourly?.time ?? [];
   const uvValues = data.hourly?.uv_index ?? [];
   const hourlyUv = times
     .map((time, index) => ({
-      time,
+      time: forecastTime(time),
       uvIndex: sanitizeUvValue(uvValues[index])
     }))
-    .filter((point) => typeof point.time === "string" && point.time.length > 0);
+    .filter((point): point is UvPoint => point.time !== null);
 
   return sanitizeWeatherSnapshot({
     uvIndex: sanitizeUvValue(data.current?.uv_index) ?? nearestUv(hourlyUv),

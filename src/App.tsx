@@ -11,6 +11,7 @@ import {
   weatherText
 } from "./i18n";
 import { getSunscreenRecommendation } from "./domain/recommendation";
+import { getUvBand, getUvForecastSummary } from "./domain/uvForecast";
 import {
   fetchWeather,
   locationFromGeolocation,
@@ -53,10 +54,12 @@ function formatLocation(location: SavedLocation | null, language: Language): str
   return [location.name, location.admin1, location.country].map(safeDisplayText).filter(Boolean).join(", ");
 }
 
-function formatTime(date: Date, language: Language): string {
+function formatTime(date: Date, language: Language, timeZone?: string, includeWeekday = false): string {
   return new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+    ...(includeWeekday ? { weekday: "short" as const } : {}),
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
+    ...(timeZone ? { timeZone } : {})
   }).format(date);
 }
 
@@ -498,6 +501,8 @@ function HomePage({
         </button>
       </section>
 
+      <DailyUvPlan exposure={exposure} language={language} settings={settings} weather={weather} />
+
       <UvTrend language={language} weather={weather} />
 
       <section className="history-panel">
@@ -542,8 +547,78 @@ function Segmented({ label, value, options, onChange }: SegmentedProps) {
   );
 }
 
+function protectionTips(
+  weather: WeatherSnapshot | null,
+  exposure: ExposureContext,
+  settings: UserSettings
+): string[] {
+  const summary = getUvForecastSummary(weather?.hourlyUv ?? []);
+  const values = [weather?.uvIndex, summary.peakUv].filter((value): value is number => typeof value === "number");
+  if (values.length === 0) return ["protectionCheckLater"];
+
+  const highestUv = Math.max(...values);
+  if (highestUv < 3) return ["protectionLow"];
+
+  const tips = ["protectionSunscreen", "protectionShade", "protectionEyes"];
+  if (highestUv >= 6) tips.push("protectionClothing");
+  if (highestUv >= 8) tips.push("protectionAvoidPeak");
+  if (exposure.sweatingOrSwimming) tips.push("protectionWater");
+  if (settings.sensitivity === "burns") tips.push("protectionSensitive");
+  return tips;
+}
+
+function DailyUvPlan({
+  exposure,
+  language,
+  settings,
+  weather
+}: {
+  exposure: ExposureContext;
+  language: Language;
+  settings: UserSettings;
+  weather: WeatherSnapshot | null;
+}) {
+  const summary = useMemo(() => getUvForecastSummary(weather?.hourlyUv ?? []), [weather]);
+  const tips = protectionTips(weather, exposure, settings);
+  const timezone = weather?.timezone;
+  const window =
+    summary.protectionStartAt && summary.protectionEndAt
+      ? `${formatTime(summary.protectionStartAt, language, timezone, true)} - ${formatTime(summary.protectionEndAt, language, timezone, true)}`
+      : summary.peakUv === null
+        ? "--"
+        : t(language, "allDayLow");
+
+  return (
+    <section className="daily-plan-panel">
+      <h2>{t(language, "dailyUvPlan")}</h2>
+      <div className="plan-metrics">
+        <div>
+          <span>{t(language, "peakUv")}</span>
+          <strong>{summary.peakUv === null ? "--" : summary.peakUv.toFixed(1)}</strong>
+        </div>
+        <div>
+          <span>{t(language, "peakTime")}</span>
+          <strong>{summary.peakAt ? formatTime(summary.peakAt, language, timezone, true) : "--"}</strong>
+        </div>
+        <div>
+          <span>{t(language, "protectionWindow")}</span>
+          <strong>{window}</strong>
+        </div>
+      </div>
+      <div className="protection-plan">
+        <h2>{t(language, "protectionPlan")}</h2>
+        <ul>
+          {tips.map((tip) => (
+            <li key={tip}>{t(language, tip)}</li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
 function UvTrend({ language, weather }: { language: Language; weather: WeatherSnapshot | null }) {
-  const points = useMemo(() => {
+  const points = (() => {
     const start = Date.now() - 60 * 60 * 1000;
     const end = Date.now() + 12 * 60 * 60 * 1000;
     return (weather?.hourlyUv ?? [])
@@ -552,7 +627,7 @@ function UvTrend({ language, weather }: { language: Language; weather: WeatherSn
         return time >= start && time <= end;
       })
       .slice(0, 13);
-  }, [weather]);
+  })();
 
   const maxUv = Math.max(8, ...points.map((point) => point.uvIndex ?? 0));
 
@@ -565,13 +640,17 @@ function UvTrend({ language, weather }: { language: Language; weather: WeatherSn
         <div className="uv-bars" role="img" aria-label={t(language, "uvTrend")}>
           {points.map((point) => {
             const uv = point.uvIndex ?? 0;
-            const hour = new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", { hour: "2-digit" }).format(
-              new Date(point.time)
-            );
+            const hour = new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+              hour: "2-digit",
+              timeZone: weather?.timezone
+            }).format(new Date(point.time));
             return (
               <div className="uv-bar" key={point.time}>
-                <span style={{ height: `${Math.max(8, (uv / maxUv) * 88)}%` }} />
-                <small>{hour}</small>
+                <small className="uv-value">{uv.toFixed(1)}</small>
+                <div className="uv-bar-track">
+                  <span className={`uv-fill uv-${getUvBand(uv)}`} style={{ height: `${Math.max(8, (uv / maxUv) * 100)}%` }} />
+                </div>
+                <small className="uv-hour">{hour}</small>
               </div>
             );
           })}
