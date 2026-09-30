@@ -26,6 +26,12 @@ describe("localStorage poisoning recovery", () => {
     installLocalStorage();
   });
 
+  it("keeps the session usable when storage writes are blocked", async () => {
+    const { saveSettings, defaultSettings } = await import("./storage");
+    vi.mocked(localStorage.setItem).mockImplementation(() => { throw new Error("QuotaExceededError"); });
+    expect(() => saveSettings(defaultSettings)).not.toThrow();
+  });
+
   it("recovers from corrupted saved settings", async () => {
     const { loadSettings } = await import("./storage");
     localStorage.setItem("suncheck:settings", '{"language":"<script>","theme":42,"sensitivity":"bad"}');

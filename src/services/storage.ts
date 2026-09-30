@@ -37,7 +37,11 @@ function readJson(key: string): unknown {
 }
 
 function writeJson(key: string, value: unknown): void {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage may be disabled or full; keep the current session usable.
+  }
 }
 
 export function todayKey(date = new Date()): string {

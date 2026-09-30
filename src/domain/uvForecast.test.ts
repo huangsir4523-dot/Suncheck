@@ -2,6 +2,26 @@ import { describe, expect, it } from "vitest";
 import { getUvBand, getUvForecastSummary } from "./uvForecast";
 
 describe("UV forecast analysis", () => {
+  it("separates nights and missing hours instead of joining them into one window", () => {
+    const now = new Date("2026-09-30T08:00:00Z");
+    const values = [4, 5, 0, 0, 3, null, 4];
+    const points = values.map((uvIndex, i) => ({ time: new Date(now.getTime() + i * 3600000).toISOString(), uvIndex }));
+    const summary = getUvForecastSummary(points, now);
+    expect(summary.protectionWindows.map(w => [w.startAt.toISOString(), w.endAt.toISOString()])).toEqual([
+      ["2026-09-30T08:00:00.000Z", "2026-09-30T10:00:00.000Z"],
+      ["2026-09-30T12:00:00.000Z", "2026-09-30T13:00:00.000Z"],
+      ["2026-09-30T14:00:00.000Z", "2026-09-30T15:00:00.000Z"]
+    ]);
+    expect(summary.hasIncompleteCoverage).toBe(true);
+  });
+
+  it("clips windows to now and the 24-hour boundary and recognizes complete coverage", () => {
+    const start = new Date("2026-09-30T08:00:00Z").getTime();
+    const points = Array.from({ length: 25 }, (_, i) => ({ time: new Date(start + i * 3600000).toISOString(), uvIndex: 4 }));
+    const summary = getUvForecastSummary(points, new Date(start + 1800000));
+    expect(summary.hasIncompleteCoverage).toBe(false);
+    expect(summary.protectionWindows).toEqual([{ startAt: new Date(start + 1800000), endAt: new Date(start + 24.5 * 3600000) }]);
+  });
   it("uses WHO UV Index thresholds", () => {
     expect(getUvBand(2.9)).toBe("low");
     expect(getUvBand(3)).toBe("moderate");

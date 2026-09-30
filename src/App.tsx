@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   actionText,
   conclusionText,
@@ -34,6 +34,7 @@ import {
   saveLastLocation,
   saveSettings
 } from "./services/storage";
+import { todayKey } from "./services/storage";
 import type {
   AppError,
   DailySunscreenLog,
@@ -84,26 +85,32 @@ function App() {
   const [isLocating, setIsLocating] = useState(false);
   const [isWeatherLoading, setIsWeatherLoading] = useState(false);
   const [now, setNow] = useState(new Date());
+  const weatherRequest = useRef(0);
+  const locationRequest = useRef(0);
+  const activeLocation = useRef(location);
 
   const language = settings.language;
-  const lastApplicationAt = log.events.at(-1)?.timestamp;
+  const todayLog = log.date === todayKey(now) ? log : { date: todayKey(now), events: [] };
+  const lastApplicationAt = todayLog.events.at(-1)?.timestamp;
+  const isStale = !!weather && now.getTime() - new Date(weather.fetchedAt).getTime() >= 60 * 60 * 1000;
+  const currentUv = isStale ? null : weather?.uvIndex ?? null;
   const recommendation = useMemo(
     () =>
       getSunscreenRecommendation({
-        uvIndex: weather?.uvIndex ?? null,
+        uvIndex: currentUv,
         context: exposure,
         settings,
         lastApplicationAt,
         now
       }),
-    [weather?.uvIndex, exposure, settings, lastApplicationAt, now]
+    [currentUv, exposure, settings, lastApplicationAt, now]
   );
 
   useEffect(() => {
     saveSettings(settings);
     document.documentElement.dataset.theme = settings.theme;
     document.documentElement.lang = settings.language === "zh" ? "zh-CN" : "en";
-    const themeColor = settings.theme === "dark" ? "#101010" : "#f7f7f4";
+    const themeColor = settings.theme === "dark" ? "#151a16" : "#f6f5ef";
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", themeColor);
   }, [settings]);
 
@@ -128,9 +135,12 @@ function App() {
 
   async function refreshWeather(nextLocation = location) {
     if (!nextLocation) return;
+    const request = ++weatherRequest.current;
+    setWeather(null);
     if (!navigator.onLine) {
       console.warn("[Suncheck] Weather refresh skipped: browser is offline");
       setError("offline");
+      setIsWeatherLoading(false);
       return;
     }
     setIsWeatherLoading(true);
@@ -142,18 +152,21 @@ function App() {
         label: nextLocation.name
       });
       const nextWeather = await fetchWeather(nextLocation);
+      if (request !== weatherRequest.current) return;
       setWeather(nextWeather);
+      setNow(new Date());
       if (nextWeather.uvIndex === null) setError("missingUv");
       console.info("[Suncheck] UV/weather loaded", {
         uvIndex: nextWeather.uvIndex,
         weatherCode: nextWeather.weatherCode
       });
     } catch (weatherError) {
+      if (request !== weatherRequest.current) return;
       console.error("[Suncheck] UV/weather request failed", weatherError);
       const isInvalidLocation = weatherError instanceof Error && weatherError.message.includes("Invalid location");
       setError(isInvalidLocation ? "invalidLocationData" : navigator.onLine ? "apiUnavailable" : "offline");
     } finally {
-      setIsWeatherLoading(false);
+      if (request === weatherRequest.current) setIsWeatherLoading(false);
     }
   }
 
@@ -164,7 +177,8 @@ function App() {
     return "geolocationUnavailable";
   }
 
-  async function handleGeolocationSuccess(position: GeolocationPosition) {
+  async function handleGeolocationSuccess(position: GeolocationPosition, request: number) {
+    if (request !== locationRequest.current) return;
     let gps: SavedLocation;
     try {
       gps = locationFromGeolocation(position);
@@ -182,46 +196,22 @@ function App() {
     });
 
     setLocation(gps);
+    activeLocation.current = gps;
     saveLastLocation(gps);
     setPage("home");
     setError(null);
-    setIsWeatherLoading(true);
-
-    const [weatherResult, reverseResult] = await Promise.allSettled([
-      fetchWeather(gps),
-      reverseGeocodeLocation(gps, language)
-    ]);
-
-    if (reverseResult.status === "fulfilled" && reverseResult.value) {
-      console.info("[Suncheck] Reverse geocoding succeeded", {
-        label: reverseResult.value.name,
-        admin1: reverseResult.value.admin1,
-        country: reverseResult.value.country
-      });
-      setLocation(reverseResult.value);
-      saveLastLocation(reverseResult.value);
-    } else if (reverseResult.status === "rejected") {
-      console.warn("[Suncheck] Reverse geocoding failed; keeping coordinate-based current location", reverseResult.reason);
-    } else {
-      console.info("[Suncheck] Reverse geocoding returned no nearby city; keeping coordinate-based current location");
-    }
-
-    if (weatherResult.status === "fulfilled") {
-      setWeather(weatherResult.value);
-      if (weatherResult.value.uvIndex === null) setError("missingUv");
-      console.info("[Suncheck] UV/weather loaded after geolocation", {
-        uvIndex: weatherResult.value.uvIndex,
-        weatherCode: weatherResult.value.weatherCode
-      });
-    } else {
-      console.error("[Suncheck] UV/weather request failed after geolocation", weatherResult.reason);
-      const isInvalidLocation =
-        weatherResult.reason instanceof Error && weatherResult.reason.message.includes("Invalid location");
-      setError(isInvalidLocation ? "invalidLocationData" : navigator.onLine ? "apiUnavailable" : "offline");
-    }
-
-    setIsWeatherLoading(false);
     setIsLocating(false);
+    void refreshWeather(gps);
+    try {
+      const named = await reverseGeocodeLocation(gps, language);
+      if (request === locationRequest.current && named) {
+        activeLocation.current = named;
+        setLocation(named);
+        saveLastLocation(named);
+      }
+    } catch {
+      // Weather is independent of the optional city-name lookup.
+    }
   }
 
   function useCurrentLocation() {
@@ -234,11 +224,13 @@ function App() {
     }
     setIsLocating(true);
     setError(null);
+    const request = ++locationRequest.current;
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        void handleGeolocationSuccess(position);
+        void handleGeolocationSuccess(position, request);
       },
       (geoError) => {
+        if (request !== locationRequest.current) return;
         const appError = geolocationErrorToAppError(geoError);
         console.warn("[Suncheck] Geolocation failed", {
           code: geoError.code,
@@ -257,6 +249,9 @@ function App() {
     try {
       const safeLocation = sanitizeLocation(next);
       if (!safeLocation) throw new Error("Invalid location data");
+      locationRequest.current++;
+      activeLocation.current = safeLocation;
+      setIsLocating(false);
       setLocation(safeLocation);
       saveLastLocation(safeLocation);
       setPage("home");
@@ -269,9 +264,13 @@ function App() {
 
   function addFavorite() {
     if (!location) return;
-    if (favorites.some((favorite) => favorite.id === location.id)) return;
+    if (favorites.some((favorite) => favorite.id === location.id)) {
+      setNotice(t(language, "alreadyFavorite"));
+      return;
+    }
     const favoriteLocation: SavedLocation = { ...location, source: "favorite" };
     setFavorites([favoriteLocation, ...favorites].slice(0, 3));
+    setNotice(t(language, "savedFavorite"));
   }
 
   function removeFavorite(id: string) {
@@ -281,7 +280,14 @@ function App() {
   function recordSunscreen() {
     setLog(addSunscreenEvent(new Date()));
     setNow(new Date());
+    setNotice(t(language, "recorded"));
   }
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   function updateSettings(patch: Partial<UserSettings>) {
     setSettings((current) => ({ ...current, ...patch }));
@@ -291,7 +297,22 @@ function App() {
     setExposure((current) => ({ ...current, ...patch }));
   }
 
-  const activeButtonLabel = log.events.length > 0 ? t(language, "reappliedButton") : t(language, "appliedButton");
+  useEffect(() => {
+    function resume() {
+      if (document.visibilityState !== "visible") return;
+      setNow(new Date());
+      setLog(loadTodayLog());
+      if (activeLocation.current) void refreshWeather(activeLocation.current);
+    }
+    window.addEventListener("online", resume);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      window.removeEventListener("online", resume);
+      document.removeEventListener("visibilitychange", resume);
+    };
+  }, []);
+
+  const activeButtonLabel = todayLog.events.length > 0 ? t(language, "reappliedButton") : t(language, "appliedButton");
 
   return (
     <div className="app-shell">
@@ -311,10 +332,18 @@ function App() {
       </header>
 
       <main>
-        {error ? <div className="banner">{errorText(language, error)}</div> : null}
-        {notice ? <div className="banner subtle">{notice}</div> : null}
+        {error ? <div className="banner" role="alert">{errorText(language, error)}</div> : null}
+        {notice ? <div className="banner subtle" role="status">{notice}</div> : null}
 
-        {page === "home" ? (
+        {page === "home" && !location ? (
+          <section className="plain-section empty-home">
+            <p className="hero-eyebrow">{t(language, "dailyCompanion")}</p>
+            <h1>{t(language, "welcomeTitle")}</h1>
+            <p className="muted">{t(language, "welcomeBody")}</p>
+            <button className="primary-action" onClick={() => setPage("location")}>{t(language, "chooseCity")}</button>
+          </section>
+        ) : null}
+        {page === "home" && location ? (
           <HomePage
             activeButtonLabel={activeButtonLabel}
             exposure={exposure}
@@ -322,7 +351,9 @@ function App() {
             isWeatherLoading={isWeatherLoading}
             language={language}
             locationName={formatLocation(location, language)}
-            log={log}
+            log={todayLog}
+            now={now}
+            isStale={isStale}
             recommendation={recommendation}
             settings={settings}
             weather={weather}
@@ -349,7 +380,7 @@ function App() {
         {page === "settings" ? (
           <SettingsPage
             language={language}
-            log={log}
+            log={todayLog}
             settings={settings}
             onClearHistory={() => {
               setLog(clearTodayLog());
@@ -378,6 +409,8 @@ function App() {
 }
 
 interface HomePageProps {
+  now: Date;
+  isStale: boolean;
   activeButtonLabel: string;
   exposure: ExposureContext;
   isLocating: boolean;
@@ -396,6 +429,8 @@ interface HomePageProps {
 }
 
 function HomePage({
+  now,
+  isStale,
   activeButtonLabel,
   exposure,
   isLocating,
@@ -421,25 +456,27 @@ function HomePage({
           </button>
           <span>{isWeatherLoading ? t(language, "loadingWeather") : weatherText(language, weather?.weatherCode ?? null)}</span>
         </div>
-        <h1>{conclusionText(language, recommendation)}</h1>
+        <p className="hero-eyebrow">{t(language, "dailyCompanion")}</p>
+        <h1>{isWeatherLoading ? t(language, "loadingWeather") : isStale || weather?.uvIndex == null ? t(language, "waitingUv") : conclusionText(language, recommendation)}</h1>
         <div className="risk-line">
           <span className="risk-dot" aria-hidden="true" />
-          <span>{riskText(language, recommendation.risk)}</span>
+          <span>{isStale || weather?.uvIndex == null ? t(language, "dataUnavailable") : riskText(language, recommendation.risk)}</span>
         </div>
         <div className="metric-grid">
           <div>
             <span>{t(language, "uvIndex")}</span>
-            <strong>{weather?.uvIndex === null || weather?.uvIndex === undefined ? "--" : weather.uvIndex.toFixed(1)}</strong>
+            <strong>{isStale || weather?.uvIndex == null ? "--" : weather.uvIndex.toFixed(1)}</strong>
           </div>
           <div>
             <span>{t(language, "weather")}</span>
             <strong>{formatTemp(weather?.temperatureC ?? null)}</strong>
           </div>
         </div>
+        <p className="data-status" role="status">{weather ? t(language, isStale ? "staleData" : "updatedAt", { time: formatTime(new Date(weather.fetchedAt), language) }) : t(language, "awaitingData")}</p>
         <p>{reasonText(language, recommendation.reason)}</p>
         <div className="next-action">
           <span>{t(language, "next")}</span>
-          <strong>{actionText(language, recommendation.nextAction)}</strong>
+          <strong>{isStale || weather?.uvIndex == null ? t(language, "checkForecast") : actionText(language, recommendation.nextAction)}</strong>
         </div>
         {recommendation.reapplyAt ? (
           <div className="countdown">
@@ -455,14 +492,15 @@ function HomePage({
         <button className="primary-action" type="button" onClick={onRecord}>
           {activeButtonLabel}
         </button>
-        <button className="secondary-action" type="button" onClick={onRefresh}>
+        <button className="secondary-action" type="button" onClick={onRefresh} disabled={isWeatherLoading} aria-busy={isWeatherLoading}>
           {t(language, "refresh")}
         </button>
       </div>
 
       <section className="control-panel">
+        <h2 className="context-title">{t(language, "yourContext")}</h2>
         <Segmented
-          label=""
+          label={t(language, "exposurePlace")}
           value={exposure.place}
           options={[
             { value: "outdoor", label: t(language, "outdoor") },
@@ -472,7 +510,7 @@ function HomePage({
         />
         {exposure.place === "indoor" ? (
           <Segmented
-            label=""
+            label={t(language, "windowExposure")}
             value={exposure.nearWindow ? "yes" : "no"}
             options={[
               { value: "yes", label: t(language, "nearWindow") },
@@ -495,15 +533,16 @@ function HomePage({
         <button
           className={`toggle-line ${exposure.sweatingOrSwimming ? "selected" : ""}`}
           type="button"
+          aria-pressed={exposure.sweatingOrSwimming}
           onClick={() => onUpdateExposure({ sweatingOrSwimming: !exposure.sweatingOrSwimming })}
         >
           {exposure.sweatingOrSwimming ? t(language, "sweat") : t(language, "noSweat")}
         </button>
       </section>
 
-      <DailyUvPlan exposure={exposure} language={language} settings={settings} weather={weather} />
+      <DailyUvPlan exposure={exposure} language={language} settings={settings} weather={isStale ? null : weather} now={now} />
 
-      <UvTrend language={language} weather={weather} />
+      <UvTrend language={language} weather={isStale ? null : weather} now={now} />
 
       <section className="history-panel">
         <div className="section-heading">
@@ -529,7 +568,7 @@ interface SegmentedProps {
 
 function Segmented({ label, value, options, onChange }: SegmentedProps) {
   return (
-    <label className="segmented-wrap">
+    <div className="segmented-wrap" role="group" aria-label={label || undefined}>
       {label ? <span>{label}</span> : null}
       <div className="segmented">
         {options.map((option) => (
@@ -537,27 +576,29 @@ function Segmented({ label, value, options, onChange }: SegmentedProps) {
             className={option.value === value ? "selected" : ""}
             key={option.value}
             type="button"
+            aria-pressed={option.value === value}
             onClick={() => onChange(option.value)}
           >
             {option.label}
           </button>
         ))}
       </div>
-    </label>
+    </div>
   );
 }
 
 function protectionTips(
   weather: WeatherSnapshot | null,
   exposure: ExposureContext,
-  settings: UserSettings
+  settings: UserSettings,
+  now: Date
 ): string[] {
-  const summary = getUvForecastSummary(weather?.hourlyUv ?? []);
+  const summary = getUvForecastSummary(weather?.hourlyUv ?? [], now);
   const values = [weather?.uvIndex, summary.peakUv].filter((value): value is number => typeof value === "number");
   if (values.length === 0) return ["protectionCheckLater"];
 
   const highestUv = Math.max(...values);
-  if (highestUv < 3) return ["protectionLow"];
+  if (highestUv < 3) return [summary.hasIncompleteCoverage ? "protectionCheckLater" : "protectionLow"];
 
   const tips = ["protectionSunscreen", "protectionShade", "protectionEyes"];
   if (highestUv >= 6) tips.push("protectionClothing");
@@ -571,22 +612,18 @@ function DailyUvPlan({
   exposure,
   language,
   settings,
-  weather
+  weather,
+  now
 }: {
   exposure: ExposureContext;
   language: Language;
   settings: UserSettings;
   weather: WeatherSnapshot | null;
+  now: Date;
 }) {
-  const summary = useMemo(() => getUvForecastSummary(weather?.hourlyUv ?? []), [weather]);
-  const tips = protectionTips(weather, exposure, settings);
+  const summary = getUvForecastSummary(weather?.hourlyUv ?? [], now);
+  const tips = protectionTips(weather, exposure, settings, now);
   const timezone = weather?.timezone;
-  const window =
-    summary.protectionStartAt && summary.protectionEndAt
-      ? `${formatTime(summary.protectionStartAt, language, timezone, true)} - ${formatTime(summary.protectionEndAt, language, timezone, true)}`
-      : summary.peakUv === null
-        ? "--"
-        : t(language, "allDayLow");
 
   return (
     <section className="daily-plan-panel">
@@ -602,9 +639,15 @@ function DailyUvPlan({
         </div>
         <div>
           <span>{t(language, "protectionWindow")}</span>
-          <strong>{window}</strong>
+          {summary.protectionWindows.length ? (
+            <ul className="protection-windows">{summary.protectionWindows.map((window) => (
+              <li key={window.startAt.toISOString()}>{formatTime(window.startAt, language, timezone, true)} – {formatTime(window.endAt, language, timezone, true)}</li>
+            ))}</ul>
+          ) : <strong>{summary.peakUv === null ? "--" : t(language, summary.hasIncompleteCoverage ? "partialLow" : "allDayLow")}</strong>}
         </div>
       </div>
+      <p className="forecast-note">{t(language, "forecastTimezone", { zone: timezone || "UTC" })}</p>
+      {summary.hasIncompleteCoverage ? <p className="forecast-note">{t(language, "partialForecast")}</p> : null}
       <div className="protection-plan">
         <h2>{t(language, "protectionPlan")}</h2>
         <ul>
@@ -617,10 +660,10 @@ function DailyUvPlan({
   );
 }
 
-function UvTrend({ language, weather }: { language: Language; weather: WeatherSnapshot | null }) {
+function UvTrend({ language, weather, now }: { language: Language; weather: WeatherSnapshot | null; now: Date }) {
   const points = (() => {
-    const start = Date.now() - 60 * 60 * 1000;
-    const end = Date.now() + 12 * 60 * 60 * 1000;
+    const start = now.getTime() - 60 * 60 * 1000;
+    const end = now.getTime() + 12 * 60 * 60 * 1000;
     return (weather?.hourlyUv ?? [])
       .filter((point) => {
         const time = new Date(point.time).getTime();
@@ -637,18 +680,18 @@ function UvTrend({ language, weather }: { language: Language; weather: WeatherSn
       {points.length === 0 ? (
         <p className="empty">{t(language, "missingUv")}</p>
       ) : (
-        <div className="uv-bars" role="img" aria-label={t(language, "uvTrend")}>
+        <div className="uv-bars" role="list" aria-label={t(language, "uvTrend")} tabIndex={0}>
           {points.map((point) => {
-            const uv = point.uvIndex ?? 0;
+            const uv = point.uvIndex;
             const hour = new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
               hour: "2-digit",
               timeZone: weather?.timezone
             }).format(new Date(point.time));
             return (
-              <div className="uv-bar" key={point.time}>
-                <small className="uv-value">{uv.toFixed(1)}</small>
+              <div className="uv-bar" key={point.time} role="listitem" aria-label={`${formatTime(new Date(point.time), language, weather?.timezone, true)}: ${uv === null ? t(language, "dataUnavailable") : `UV ${uv.toFixed(1)}`}`}>
+                <small className="uv-value">{uv === null ? "—" : uv.toFixed(1)}</small>
                 <div className="uv-bar-track">
-                  <span className={`uv-fill uv-${getUvBand(uv)}`} style={{ height: `${Math.max(8, (uv / maxUv) * 100)}%` }} />
+                  <span className={`uv-fill uv-${uv === null ? "missing" : getUvBand(uv)}`} style={{ height: `${Math.max(8, ((uv ?? 0) / maxUv) * 100)}%` }} />
                 </div>
                 <small className="uv-hour">{hour}</small>
               </div>
@@ -656,6 +699,8 @@ function UvTrend({ language, weather }: { language: Language; weather: WeatherSn
           })}
         </div>
       )}
+      <div className="uv-legend">{(["low", "moderate", "high", "veryHigh", "extreme"] as const).map((band) => <span key={band}><i className={`uv-fill uv-${band}`} aria-hidden="true" />{t(language, `band_${band}`)}</span>)}</div>
+      <p className="forecast-note">{t(language, "hourlyForecastNote")}</p>
     </section>
   );
 }
@@ -743,7 +788,7 @@ function LocationPage({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          <button type="submit">{isSearching ? "..." : t(language, "searchCity")}</button>
+          <button type="submit" disabled={isSearching || !query.trim()} aria-busy={isSearching}>{isSearching ? "..." : t(language, "searchCity")}</button>
         </form>
         {searchError ? <p className="error-text">{errorText(language, searchError)}</p> : null}
         <div className="list">

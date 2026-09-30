@@ -5,12 +5,14 @@ import { isValidLatitude, isValidLongitude, sanitizeLocation, sanitizeUvValue, s
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
 const REVERSE_GEOCODING_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client";
+const REQUEST_TIMEOUT_MS = 10_000;
+const HOUR_MS = 60 * 60 * 1000;
 
 interface ForecastResponse {
   timezone?: string;
   utc_offset_seconds?: number;
   current?: {
-    time?: string;
+    time?: string | number;
     temperature_2m?: number;
     weather_code?: number;
     uv_index?: number;
@@ -47,31 +49,37 @@ function assertOk(response: Response): Response {
   return response;
 }
 
+async function fetchJson(url: URL): Promise<unknown> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = assertOk(await fetch(url, { signal: controller.signal }));
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function assertValidLocation(location: SavedLocation): void {
   if (!isValidLatitude(location.latitude) || !isValidLongitude(location.longitude)) {
     throw new Error("Invalid location coordinates");
   }
 }
 
-function nearestUv(hourly: UvPoint[], now = new Date()): number | null {
-  if (hourly.length === 0) return null;
-  const nearest = hourly.reduce<{ point: UvPoint; diff: number } | null>((best, point) => {
-    const uvIndex = sanitizeUvValue(point.uvIndex);
-    if (uvIndex === null) return best;
-    const diff = Math.abs(new Date(point.time).getTime() - now.getTime());
-    if (!best || diff < best.diff) return { point, diff };
-    return best;
-  }, null);
-  return sanitizeUvValue(nearest?.point.uvIndex);
+function currentHourlyUv(hourly: UvPoint[], now: Date): number | null {
+  const point = hourly.find((point) => {
+    const age = now.getTime() - new Date(point.time).getTime();
+    return age >= 0 && age < HOUR_MS;
+  });
+  return sanitizeUvValue(point?.uvIndex);
 }
 
-function forecastTime(value: string | number): string | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return new Date(value * 1000).toISOString();
-  }
-  if (typeof value !== "string" || !value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+function forecastTime(value: unknown): string | null {
+  // Unix seconds are requested; ISO strings must carry a timezone to be unambiguous.
+  if (typeof value !== "number" &&
+      (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value))) return null;
+  const parsed = new Date(typeof value === "number" ? value * 1000 : value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
 export async function fetchWeather(location: SavedLocation): Promise<WeatherSnapshot> {
@@ -85,22 +93,25 @@ export async function fetchWeather(location: SavedLocation): Promise<WeatherSnap
   url.searchParams.set("timezone", "auto");
   url.searchParams.set("timeformat", "unixtime");
 
-  const data = (await fetch(url).then(assertOk).then((response) => response.json())) as ForecastResponse;
-  const times = data.hourly?.time ?? [];
-  const uvValues = data.hourly?.uv_index ?? [];
+  const data = (await fetchJson(url)) as ForecastResponse | null;
+  const now = new Date();
+  const times = Array.isArray(data?.hourly?.time) ? data.hourly.time : [];
+  const uvValues = Array.isArray(data?.hourly?.uv_index) ? data.hourly.uv_index : [];
   const hourlyUv = times
     .map((time, index) => ({
       time: forecastTime(time),
       uvIndex: sanitizeUvValue(uvValues[index])
     }))
     .filter((point): point is UvPoint => point.time !== null);
+  const currentTime = forecastTime(data?.current?.time);
+  const currentAge = currentTime ? now.getTime() - new Date(currentTime).getTime() : Number.POSITIVE_INFINITY;
 
   return sanitizeWeatherSnapshot({
-    uvIndex: sanitizeUvValue(data.current?.uv_index) ?? nearestUv(hourlyUv),
-    weatherCode: data.current?.weather_code ?? null,
-    temperatureC: data.current?.temperature_2m ?? null,
-    fetchedAt: new Date().toISOString(),
-    timezone: safeDisplayText(data.timezone) || undefined,
+    uvIndex: (currentAge >= 0 && currentAge < HOUR_MS ? sanitizeUvValue(data?.current?.uv_index) : null) ?? currentHourlyUv(hourlyUv, now),
+    weatherCode: data?.current?.weather_code ?? null,
+    temperatureC: data?.current?.temperature_2m ?? null,
+    fetchedAt: now.toISOString(),
+    timezone: safeDisplayText(data?.timezone) || undefined,
     hourlyUv
   });
 }
@@ -115,7 +126,7 @@ export async function searchCities(query: string, language: Language): Promise<S
   url.searchParams.set("language", language);
   url.searchParams.set("format", "json");
 
-  const data = (await fetch(url).then(assertOk).then((response) => response.json())) as GeocodingResponse;
+  const data = (await fetchJson(url)) as GeocodingResponse;
   const results: SearchResult[] = [];
 
   for (const result of data.results ?? []) {
@@ -147,7 +158,7 @@ export async function reverseGeocodeLocation(location: SavedLocation, language: 
   url.searchParams.set("longitude", String(location.longitude));
   url.searchParams.set("localityLanguage", language === "zh" ? "zh" : "en");
 
-  const data = (await fetch(url).then(assertOk).then((response) => response.json())) as ReverseGeocodingResponse;
+  const data = (await fetchJson(url)) as ReverseGeocodingResponse;
   const cityName = safeDisplayText(data.city || data.locality || data.principalSubdivision);
 
   if (!cityName) return null;

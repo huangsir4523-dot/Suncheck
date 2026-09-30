@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchWeather, searchCities } from "./openMeteoProvider";
 import type { SavedLocation } from "../types";
 
@@ -11,6 +11,10 @@ function jsonResponse(data: unknown, ok = true): Response {
 }
 
 describe("Open-Meteo provider hardening", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -87,7 +91,7 @@ describe("Open-Meteo provider hardening", () => {
             uv_index: "bad"
           },
           hourly: {
-            time: ["2026-07-09T12:00"],
+            time: ["2026-07-09T12:00:00Z"],
             uv_index: [Number.NaN]
           }
         })
@@ -130,5 +134,39 @@ describe("Open-Meteo provider hardening", () => {
     expect(url.searchParams.get("timeformat")).toBe("unixtime");
     expect(weather.timezone).toBe("Asia/Shanghai");
     expect(weather.hourlyUv[0].time).toBe("2026-07-21T16:00:00.000Z");
+  });
+
+  it("does not substitute stale or future UV for the current hour", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T04:30:00Z"));
+    const city: SavedLocation = { id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      current: { time: "2026-09-30T02:00:00Z", uv_index: 9 },
+      hourly: { time: ["2026-09-30T03:00:00Z", "2026-09-30T05:00:00Z"], uv_index: [8, 7] }
+    })));
+    expect((await fetchWeather(city)).uvIndex).toBeNull();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      hourly: { time: ["2026-09-30T04:00:00Z"], uv_index: [4.2] }
+    })));
+    expect((await fetchWeather(city)).uvIndex).toBe(4.2);
+  });
+
+  it("drops invalid timestamps without throwing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      hourly: { time: [Infinity, 1e30, "bad", "2026-09-30T04:00", "2026-09-30T04:00:00Z"], uv_index: [1, 2, 3, 4, 5] }
+    })));
+    const weather = await fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
+    expect(weather.hourlyUv).toEqual([{ time: "2026-09-30T04:00:00.000Z", uvIndex: 5 }]);
+  });
+
+  it("aborts a stalled weather request after ten seconds", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn((_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+    })));
+    const request = fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
+    const assertion = expect(request).rejects.toThrow("aborted");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
   });
 });

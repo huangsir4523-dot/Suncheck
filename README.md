@@ -11,6 +11,16 @@ Suncheck is a mobile-first Web App / PWA that answers one daily question: do I n
 
 ## Open-source Research Notes
 
+### September 2026 usability update
+
+- The responsive dashboard now uses a calmer light/dark palette, smaller headings, explicit control selection, and a horizontally scrollable hourly UV chart with a legend. Missing UV samples are shown as a dash rather than zero.
+- Forecast protection windows are split at low-UV periods and missing hours, clipped to the next 24 hours, and accompanied by a partial-coverage notice when needed. Times use the selected city's timezone.
+- Weather requests time out after 10 seconds. Switching cities clears the old readings and ignores late responses from previous selections. Optional reverse geocoding no longer delays weather display.
+- Weather refreshes when the page becomes visible or connectivity returns. Readings older than one hour are not used for current advice. Daily records roll over on the device's local date.
+- Blocked/full local storage no longer crashes the app; changes may only last for the current session in that case. GitHub Pages deployment runs the test suite before building.
+
+Validation: 26 unit tests, TypeScript/production build, and Chrome browser checks covering 320/390px layouts, desktop, Chinese/English, dark mode, request races, failed requests/retry, stale data, and daily-record rollover. Browser checks use controlled weather responses for reproducible edge cases.
+
 The July 2026 feature update reviewed several related GitHub projects before extending Suncheck:
 
 - [jondcallahan/sunburntimer](https://github.com/jondcallahan/sunburntimer) is the closest functional match. It combines React, TypeScript, Open-Meteo, skin sensitivity, sunscreen, activity context, and hourly UV charts. Its README says MIT, but the repository does not currently expose a verifiable license file, so Suncheck uses only the high-level product ideas and does not copy its code.
