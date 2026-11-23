@@ -3,15 +3,19 @@ import {
   sanitizeDailyLog,
   sanitizeExposure,
   sanitizeLocation,
-  sanitizeSettings
+  sanitizeSettings,
+  sanitizeStoredWeather
 } from "../security/validation";
-import type { DailySunscreenLog, ExposureContext, SavedLocation, SunscreenEvent, UserSettings } from "../types";
+import type { DailySunscreenLog, ExposureContext, SavedLocation, SunscreenEvent, UserSettings, WeatherSnapshot } from "../types";
 
 const SETTINGS_KEY = "suncheck:settings";
 const EXPOSURE_KEY = "suncheck:exposure";
 const FAVORITES_KEY = "suncheck:favorites";
 const LOCATION_KEY = "suncheck:last-location";
 const LOG_PREFIX = "suncheck:log:";
+const WEATHER_KEY = "suncheck:weather";
+/** Hourly forecasts stay useful for a while, so a saved one can bridge a failed refresh. */
+export const WEATHER_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 export const defaultSettings: UserSettings = {
   language: detectLanguage(),
@@ -129,4 +133,24 @@ export function clearTodayLog(date = new Date()): DailySunscreenLog {
   const log = { date: todayKey(date), events: [] };
   saveTodayLog(log);
   return log;
+}
+
+/** Weather is cached per place; coordinates are rounded so a renamed GPS fix keeps its cache. */
+export function weatherKey(location: Pick<SavedLocation, "latitude" | "longitude">): string {
+  return `${location.latitude.toFixed(2)},${location.longitude.toFixed(2)}`;
+}
+
+export function loadCachedWeather(location: SavedLocation, now = new Date()): WeatherSnapshot | null {
+  const raw = readJson(WEATHER_KEY);
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as { key?: unknown; snapshot?: unknown };
+  if (record.key !== weatherKey(location)) return null;
+  const snapshot = sanitizeStoredWeather(record.snapshot);
+  if (!snapshot) return null;
+  const age = now.getTime() - new Date(snapshot.fetchedAt).getTime();
+  return age >= 0 && age < WEATHER_CACHE_MAX_AGE_MS ? snapshot : null;
+}
+
+export function saveCachedWeather(location: SavedLocation, snapshot: WeatherSnapshot): void {
+  writeJson(WEATHER_KEY, { key: weatherKey(location), snapshot });
 }

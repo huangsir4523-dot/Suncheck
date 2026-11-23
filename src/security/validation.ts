@@ -112,9 +112,22 @@ export function sanitizeUvValue(value: unknown): number | null {
   return Math.max(0, Math.min(15, value));
 }
 
+/** Returns the zone only if this browser can format with it; a bad zone would otherwise crash rendering. */
+export function safeTimeZone(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value || value.length > 64) return undefined;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
 export function sanitizeWeatherSnapshot(value: WeatherSnapshot): WeatherSnapshot {
   return {
     ...value,
+    timezone: safeTimeZone(value.timezone),
+    uvSource: value.uvSource === "airQuality" ? "airQuality" : "forecast",
     uvIndex: sanitizeUvValue(value.uvIndex),
     weatherCode:
       typeof value.weatherCode === "number" && Number.isFinite(value.weatherCode) ? Math.round(value.weatherCode) : null,
@@ -125,4 +138,26 @@ export function sanitizeWeatherSnapshot(value: WeatherSnapshot): WeatherSnapshot
       uvIndex: sanitizeUvValue(point.uvIndex)
     }))
   };
+}
+
+/** Rebuilds a weather snapshot read back from storage, or returns null if it is not trustworthy. */
+export function sanitizeStoredWeather(value: unknown): WeatherSnapshot | null {
+  if (!isRecord(value) || typeof value.fetchedAt !== "string" || !Array.isArray(value.hourlyUv)) return null;
+  const fetchedAt = new Date(value.fetchedAt);
+  if (Number.isNaN(fetchedAt.getTime())) return null;
+  const hourlyUv = value.hourlyUv
+    .filter(isRecord)
+    .map((point) => ({ time: typeof point.time === "string" ? new Date(point.time) : new Date(Number.NaN), uvIndex: point.uvIndex }))
+    .filter((point) => !Number.isNaN(point.time.getTime()))
+    .slice(0, 96)
+    .map((point) => ({ time: point.time.toISOString(), uvIndex: sanitizeUvValue(point.uvIndex) }));
+  return sanitizeWeatherSnapshot({
+    uvIndex: sanitizeUvValue(value.uvIndex),
+    weatherCode: typeof value.weatherCode === "number" ? value.weatherCode : null,
+    temperatureC: typeof value.temperatureC === "number" ? value.temperatureC : null,
+    fetchedAt: fetchedAt.toISOString(),
+    timezone: safeDisplayText(value.timezone) || undefined,
+    uvSource: value.uvSource === "airQuality" ? "airQuality" : "forecast",
+    hourlyUv
+  });
 }

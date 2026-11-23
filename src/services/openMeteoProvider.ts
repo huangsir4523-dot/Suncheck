@@ -3,9 +3,15 @@ import { safeCityInput, safeDisplayText } from "../security/sanitize";
 import { isValidLatitude, isValidLongitude, sanitizeLocation, sanitizeUvValue, sanitizeWeatherSnapshot } from "../security/validation";
 
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+// Independent Open-Meteo host (CAMS model) used as a UV fallback when the main forecast is down or has no UV.
+const AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
 const REVERSE_GEOCODING_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client";
-const REQUEST_TIMEOUT_MS = 10_000;
+// One timeout per attempt: a quick first try, then a more patient retry for slow mobile networks.
+export const WEATHER_ATTEMPT_TIMEOUTS_MS = [8_000, 12_000] as const;
+export const FALLBACK_TIMEOUT_MS = 10_000;
+export const RETRY_DELAY_MS = 700;
+const REVERSE_GEOCODING_TIMEOUT_MS = 8_000;
 const HOUR_MS = 60 * 60 * 1000;
 
 interface ForecastResponse {
@@ -44,20 +50,71 @@ interface ReverseGeocodingResponse {
   lookupSource?: string;
 }
 
-function assertOk(response: Response): Response {
-  if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-  return response;
+interface AirQualityResponse {
+  timezone?: string;
+  hourly?: {
+    time?: Array<string | number>;
+    uv_index?: Array<number | null>;
+  };
 }
 
-async function fetchJson(url: URL): Promise<unknown> {
+export class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`Request failed: ${status}`);
+    this.name = "HttpError";
+  }
+}
+
+function isRetryable(error: unknown): boolean {
+  // Network errors and timeouts are worth another try; most 4xx responses are not.
+  if (error instanceof HttpError) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+  return true;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchJson(url: URL, timeoutMs: number): Promise<unknown> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = assertOk(await fetch(url, { signal: controller.signal }));
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new HttpError(response.status);
     return await response.json();
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchJsonWithRetry(url: URL, timeouts: readonly number[] = WEATHER_ATTEMPT_TIMEOUTS_MS): Promise<unknown> {
+  let lastError: unknown = new Error("Request was not attempted");
+  for (let attempt = 0; attempt < timeouts.length; attempt++) {
+    if (attempt > 0) await wait(RETRY_DELAY_MS * attempt);
+    try {
+      return await fetchJson(url, timeouts[attempt]);
+    } catch (error) {
+      lastError = error;
+      console.warn(`[Suncheck] Request attempt ${attempt + 1}/${timeouts.length} failed`, url.hostname, error);
+      if (!isRetryable(error)) break;
+    }
+  }
+  throw lastError;
+}
+
+function parseHourlyUv(hourly: { time?: Array<string | number>; uv_index?: Array<number | null> } | undefined): UvPoint[] {
+  const times = Array.isArray(hourly?.time) ? hourly.time : [];
+  const uvValues = Array.isArray(hourly?.uv_index) ? hourly.uv_index : [];
+  return times
+    .map((time, index) => ({
+      time: forecastTime(time),
+      uvIndex: sanitizeUvValue(uvValues[index])
+    }))
+    .filter((point): point is UvPoint => point.time !== null);
+}
+
+function hasUv(points: UvPoint[]): boolean {
+  return points.some((point) => point.uvIndex !== null);
 }
 
 function assertValidLocation(location: SavedLocation): void {
@@ -82,36 +139,65 @@ function forecastTime(value: unknown): string | null {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
-export async function fetchWeather(location: SavedLocation): Promise<WeatherSnapshot> {
-  assertValidLocation(location);
-  const url = new URL(FORECAST_URL);
+function locationUrl(base: string, location: SavedLocation): URL {
+  const url = new URL(base);
   url.searchParams.set("latitude", String(location.latitude));
   url.searchParams.set("longitude", String(location.longitude));
-  url.searchParams.set("current", "temperature_2m,weather_code,uv_index");
-  url.searchParams.set("hourly", "uv_index");
   url.searchParams.set("forecast_days", "2");
   url.searchParams.set("timezone", "auto");
   url.searchParams.set("timeformat", "unixtime");
+  return url;
+}
 
-  const data = (await fetchJson(url)) as ForecastResponse | null;
+export async function fetchWeather(location: SavedLocation): Promise<WeatherSnapshot> {
+  assertValidLocation(location);
+  const url = locationUrl(FORECAST_URL, location);
+  url.searchParams.set("current", "temperature_2m,weather_code,uv_index");
+  url.searchParams.set("hourly", "uv_index");
+
+  let data: ForecastResponse | null = null;
+  let forecastError: unknown = null;
+  try {
+    data = (await fetchJsonWithRetry(url)) as ForecastResponse | null;
+  } catch (error) {
+    forecastError = error;
+  }
+
+  let hourlyUv = parseHourlyUv(data?.hourly);
+  let timezone = safeDisplayText(data?.timezone);
+  let uvSource: WeatherSnapshot["uvSource"] = "forecast";
+
+  if (!hasUv(hourlyUv)) {
+    // The main forecast failed or came back without UV: try the independent air-quality endpoint.
+    try {
+      const fallbackUrl = locationUrl(AIR_QUALITY_URL, location);
+      fallbackUrl.searchParams.set("hourly", "uv_index");
+      const fallback = (await fetchJsonWithRetry(fallbackUrl, [FALLBACK_TIMEOUT_MS])) as AirQualityResponse | null;
+      const fallbackUv = parseHourlyUv(fallback?.hourly);
+      if (hasUv(fallbackUv)) {
+        hourlyUv = fallbackUv;
+        timezone = timezone || safeDisplayText(fallback?.timezone);
+        uvSource = "airQuality";
+      }
+    } catch (fallbackError) {
+      console.warn("[Suncheck] UV fallback request failed", fallbackError);
+    }
+  }
+
+  if (forecastError && !hasUv(hourlyUv)) throw forecastError;
+
   const now = new Date();
-  const times = Array.isArray(data?.hourly?.time) ? data.hourly.time : [];
-  const uvValues = Array.isArray(data?.hourly?.uv_index) ? data.hourly.uv_index : [];
-  const hourlyUv = times
-    .map((time, index) => ({
-      time: forecastTime(time),
-      uvIndex: sanitizeUvValue(uvValues[index])
-    }))
-    .filter((point): point is UvPoint => point.time !== null);
   const currentTime = forecastTime(data?.current?.time);
   const currentAge = currentTime ? now.getTime() - new Date(currentTime).getTime() : Number.POSITIVE_INFINITY;
+  const currentUv = uvSource === "forecast" && currentAge >= 0 && currentAge < HOUR_MS ? sanitizeUvValue(data?.current?.uv_index) : null;
 
   return sanitizeWeatherSnapshot({
-    uvIndex: (currentAge >= 0 && currentAge < HOUR_MS ? sanitizeUvValue(data?.current?.uv_index) : null) ?? currentHourlyUv(hourlyUv, now),
+    uvIndex: currentUv ?? currentHourlyUv(hourlyUv, now),
     weatherCode: data?.current?.weather_code ?? null,
     temperatureC: data?.current?.temperature_2m ?? null,
     fetchedAt: now.toISOString(),
-    timezone: safeDisplayText(data?.timezone) || undefined,
+    timezone: timezone || undefined,
+    uvSource,
     hourlyUv
   });
 }
@@ -126,10 +212,10 @@ export async function searchCities(query: string, language: Language): Promise<S
   url.searchParams.set("language", language);
   url.searchParams.set("format", "json");
 
-  const data = (await fetchJson(url)) as GeocodingResponse;
+  const data = (await fetchJsonWithRetry(url)) as GeocodingResponse | null;
   const results: SearchResult[] = [];
 
-  for (const result of data.results ?? []) {
+  for (const result of data?.results ?? []) {
     const latitude = result.latitude;
     const longitude = result.longitude;
     if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) continue;
@@ -158,7 +244,7 @@ export async function reverseGeocodeLocation(location: SavedLocation, language: 
   url.searchParams.set("longitude", String(location.longitude));
   url.searchParams.set("localityLanguage", language === "zh" ? "zh" : "en");
 
-  const data = (await fetchJson(url)) as ReverseGeocodingResponse;
+  const data = ((await fetchJson(url, REVERSE_GEOCODING_TIMEOUT_MS)) ?? {}) as ReverseGeocodingResponse;
   const cityName = safeDisplayText(data.city || data.locality || data.principalSubdivision);
 
   if (!cityName) return null;

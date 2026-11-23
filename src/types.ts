@@ -46,6 +46,8 @@ export interface WeatherSnapshot {
   temperatureC: number | null;
   fetchedAt: string;
   timezone?: string;
+  /** Which Open-Meteo dataset supplied the UV values. */
+  uvSource?: "forecast" | "airQuality";
   hourlyUv: UvPoint[];
 }
 
@@ -91,4 +93,5 @@ export type AppError =
   | "invalidLocationData"
   | "apiUnavailable"
   | "offline"
-  | "missingUv";
+  | "missingUv"
+  | "showingCached";

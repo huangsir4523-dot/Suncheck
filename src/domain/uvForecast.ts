@@ -76,3 +76,13 @@ export function getUvForecastSummary(points: UvPoint[], now = new Date()): UvFor
     protectionEndAt: protectionWindows[0]?.endAt
   };
 }
+
+/** UV for the forecast hour that contains `now`, or null when that hour is missing. */
+export function getUvAt(points: UvPoint[], now = new Date()): number | null {
+  const time = now.getTime();
+  const point = points.find((candidate) => {
+    const start = new Date(candidate.time).getTime();
+    return Number.isFinite(start) && start <= time && time < start + HOUR_MS;
+  });
+  return typeof point?.uvIndex === "number" && Number.isFinite(point.uvIndex) ? point.uvIndex : null;
+}

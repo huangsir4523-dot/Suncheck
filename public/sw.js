@@ -1,4 +1,4 @@
-const CACHE_NAME = "suncheck-shell-v2";
+const CACHE_NAME = "suncheck-shell-v3";
 const BASE_PATH = new URL(self.registration.scope).pathname;
 const assetUrl = (path) => `${BASE_PATH}${path.replace(/^\/+/, "")}`;
 const SHELL_ASSETS = [
@@ -31,6 +31,12 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Weather and geocoding APIs live on other origins: let the browser fetch them directly
+  // so the service worker can never serve or break live data.
+  if (new URL(request.url).origin !== self.location.origin) {
+    return;
+  }
+
   if (request.mode === "navigate") {
     event.respondWith(fetch(request).catch(() => caches.match(BASE_PATH)));
     return;
@@ -40,8 +46,7 @@ self.addEventListener("fetch", (event) => {
     caches.match(request).then((cached) => {
       if (cached) return cached;
       return fetch(request).then((response) => {
-        const url = new URL(request.url);
-        if (url.origin === self.location.origin) {
+        if (response.ok) {
           const copy = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
         }

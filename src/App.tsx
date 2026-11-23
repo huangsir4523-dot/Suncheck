@@ -11,7 +11,7 @@ import {
   weatherText
 } from "./i18n";
 import { getSunscreenRecommendation } from "./domain/recommendation";
-import { getUvBand, getUvForecastSummary } from "./domain/uvForecast";
+import { getUvAt, getUvBand, getUvForecastSummary, type UvBand } from "./domain/uvForecast";
 import {
   fetchWeather,
   locationFromGeolocation,
@@ -24,15 +24,19 @@ import { sanitizeLocation } from "./security/validation";
 import {
   addSunscreenEvent,
   clearTodayLog,
+  loadCachedWeather,
   loadExposure,
   loadFavorites,
   loadLastLocation,
   loadSettings,
   loadTodayLog,
+  saveCachedWeather,
   saveExposure,
   saveFavorites,
   saveLastLocation,
-  saveSettings
+  saveSettings,
+  WEATHER_CACHE_MAX_AGE_MS,
+  weatherKey
 } from "./services/storage";
 import { todayKey } from "./services/storage";
 import type {
@@ -49,19 +53,44 @@ import type {
 
 type Page = "home" | "location" | "settings";
 
+interface WeatherState {
+  key: string;
+  data: WeatherSnapshot;
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+/** Coming back to the app refreshes only when the data is older than this. */
+const REFRESH_ON_RESUME_AFTER_MS = 10 * 60 * 1000;
+/** Background retries after a failed refresh: 20 s, 40 s, 60 s. */
+const AUTO_RETRY_DELAYS_MS = [20_000, 40_000, 60_000];
+
+function cachedWeatherState(location: SavedLocation | null): WeatherState | null {
+  if (!location) return null;
+  const data = loadCachedWeather(location);
+  return data ? { key: weatherKey(location), data } : null;
+}
+
 function formatLocation(location: SavedLocation | null, language: Language): string {
   if (!location) return t(language, "changeLocation");
   if (location.source === "gps" && location.name === "GPS") return t(language, "currentLocation");
-  return [location.name, location.admin1, location.country].map(safeDisplayText).filter(Boolean).join(", ");
+  const parts = [location.name, location.admin1, location.country].map(safeDisplayText).filter(Boolean);
+  // "Shanghai, Shanghai, China" reads better as "Shanghai, China".
+  return parts.filter((part, index) => parts.indexOf(part) === index).join(", ");
 }
 
 function formatTime(date: Date, language: Language, timeZone?: string, includeWeekday = false): string {
-  return new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+  const options: Intl.DateTimeFormatOptions = {
     ...(includeWeekday ? { weekday: "short" as const } : {}),
     hour: "2-digit",
     minute: "2-digit",
-    ...(timeZone ? { timeZone } : {})
-  }).format(date);
+    hourCycle: "h23"
+  };
+  const locale = language === "zh" ? "zh-CN" : "en-US";
+  try {
+    return new Intl.DateTimeFormat(locale, timeZone ? { ...options, timeZone } : options).format(date);
+  } catch {
+    return new Intl.DateTimeFormat(locale, options).format(date);
+  }
 }
 
 function formatTemp(value: number | null): string {
@@ -78,7 +107,7 @@ function App() {
   const [favorites, setFavorites] = useState<SavedLocation[]>(() => loadFavorites());
   const [location, setLocation] = useState<SavedLocation | null>(() => loadLastLocation());
   const [log, setLog] = useState<DailySunscreenLog>(() => loadTodayLog());
-  const [weather, setWeather] = useState<WeatherSnapshot | null>(null);
+  const [weatherState, setWeatherState] = useState<WeatherState | null>(() => cachedWeatherState(location));
   const [page, setPage] = useState<Page>(() => (location ? "home" : "location"));
   const [error, setError] = useState<AppError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -88,12 +117,23 @@ function App() {
   const weatherRequest = useRef(0);
   const locationRequest = useRef(0);
   const activeLocation = useRef(location);
+  const latestWeather = useRef(weatherState);
+  const retryTimer = useRef<number | undefined>(undefined);
+  const autoRetries = useRef(0);
 
   const language = settings.language;
   const todayLog = log.date === todayKey(now) ? log : { date: todayKey(now), events: [] };
   const lastApplicationAt = todayLog.events.at(-1)?.timestamp;
-  const isStale = !!weather && now.getTime() - new Date(weather.fetchedAt).getTime() >= 60 * 60 * 1000;
-  const currentUv = isStale ? null : weather?.uvIndex ?? null;
+  // Only show weather that belongs to the selected place.
+  const placeWeather = location && weatherState?.key === weatherKey(location) ? weatherState.data : null;
+  const weatherAge = placeWeather ? now.getTime() - new Date(placeWeather.fetchedAt).getTime() : Number.POSITIVE_INFINITY;
+  const isStale = !!placeWeather && weatherAge >= WEATHER_CACHE_MAX_AGE_MS;
+  const weather = isStale ? null : placeWeather;
+  // A fresh reading wins; otherwise use the hourly forecast for the current hour, which stays valid for hours.
+  const liveUv = weather && weatherAge < HOUR_MS ? weather.uvIndex : null;
+  const forecastUv = weather ? getUvAt(weather.hourlyUv, now) : null;
+  const currentUv = liveUv ?? forecastUv;
+  const uvIsEstimate = liveUv === null && currentUv !== null && weatherAge >= HOUR_MS;
   const recommendation = useMemo(
     () =>
       getSunscreenRecommendation({
@@ -110,7 +150,7 @@ function App() {
     saveSettings(settings);
     document.documentElement.dataset.theme = settings.theme;
     document.documentElement.lang = settings.language === "zh" ? "zh-CN" : "en";
-    const themeColor = settings.theme === "dark" ? "#151a16" : "#f6f5ef";
+    const themeColor = settings.theme === "dark" ? "#121614" : "#f7f3ea";
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", themeColor);
   }, [settings]);
 
@@ -128,15 +168,39 @@ function App() {
   }, []);
 
   useEffect(() => {
+    latestWeather.current = weatherState;
+  }, [weatherState]);
+
+  useEffect(() => {
     if (location) {
       void refreshWeather(location);
     }
+    return () => window.clearTimeout(retryTimer.current);
   }, []);
 
-  async function refreshWeather(nextLocation = location) {
+  function scheduleAutoRetry(nextLocation: SavedLocation) {
+    const delay = AUTO_RETRY_DELAYS_MS[autoRetries.current];
+    if (delay === undefined) return;
+    autoRetries.current++;
+    retryTimer.current = window.setTimeout(() => {
+      if (activeLocation.current && weatherKey(activeLocation.current) === weatherKey(nextLocation)) {
+        void refreshWeather(activeLocation.current, true);
+      }
+    }, delay);
+  }
+
+  async function refreshWeather(nextLocation = activeLocation.current, isAutoRetry = false) {
     if (!nextLocation) return;
+    const key = weatherKey(nextLocation);
     const request = ++weatherRequest.current;
-    setWeather(null);
+    window.clearTimeout(retryTimer.current);
+    if (!isAutoRetry) autoRetries.current = 0;
+
+    // Keep showing what we already have for this place (or its saved copy) while refreshing.
+    const existing = latestWeather.current?.key === key ? latestWeather.current : cachedWeatherState(nextLocation);
+    latestWeather.current = existing;
+    setWeatherState(existing);
+
     if (!navigator.onLine) {
       console.warn("[Suncheck] Weather refresh skipped: browser is offline");
       setError("offline");
@@ -153,18 +217,33 @@ function App() {
       });
       const nextWeather = await fetchWeather(nextLocation);
       if (request !== weatherRequest.current) return;
-      setWeather(nextWeather);
-      setNow(new Date());
-      if (nextWeather.uvIndex === null) setError("missingUv");
+      const nextState = { key, data: nextWeather };
+      latestWeather.current = nextState;
+      setWeatherState(nextState);
+      saveCachedWeather(nextLocation, nextWeather);
+      autoRetries.current = 0;
+      const checkedAt = new Date();
+      setNow(checkedAt);
+      if (nextWeather.uvIndex === null && getUvAt(nextWeather.hourlyUv, checkedAt) === null) setError("missingUv");
       console.info("[Suncheck] UV/weather loaded", {
         uvIndex: nextWeather.uvIndex,
+        uvSource: nextWeather.uvSource,
         weatherCode: nextWeather.weatherCode
       });
     } catch (weatherError) {
       if (request !== weatherRequest.current) return;
       console.error("[Suncheck] UV/weather request failed", weatherError);
       const isInvalidLocation = weatherError instanceof Error && weatherError.message.includes("Invalid location");
-      setError(isInvalidLocation ? "invalidLocationData" : navigator.onLine ? "apiUnavailable" : "offline");
+      if (isInvalidLocation) {
+        setError("invalidLocationData");
+        return;
+      }
+      if (!navigator.onLine) {
+        setError("offline");
+        return;
+      }
+      setError(latestWeather.current?.key === key ? "showingCached" : "apiUnavailable");
+      scheduleAutoRetry(nextLocation);
     } finally {
       if (request === weatherRequest.current) setIsWeatherLoading(false);
     }
@@ -302,12 +381,20 @@ function App() {
       if (document.visibilityState !== "visible") return;
       setNow(new Date());
       setLog(loadTodayLog());
+      const place = activeLocation.current;
+      if (!place) return;
+      const current = latestWeather.current;
+      const age = current ? Date.now() - new Date(current.data.fetchedAt).getTime() : Number.POSITIVE_INFINITY;
+      // Switching apps should not wipe or re-download data that is still fresh.
+      if (!current || current.key !== weatherKey(place) || age > REFRESH_ON_RESUME_AFTER_MS) void refreshWeather(place);
+    }
+    function reconnect() {
       if (activeLocation.current) void refreshWeather(activeLocation.current);
     }
-    window.addEventListener("online", resume);
+    window.addEventListener("online", reconnect);
     document.addEventListener("visibilitychange", resume);
     return () => {
-      window.removeEventListener("online", resume);
+      window.removeEventListener("online", reconnect);
       document.removeEventListener("visibilitychange", resume);
     };
   }, []);
@@ -318,21 +405,41 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <button className="brand" type="button" onClick={() => setPage("home")} aria-label={t(language, "home")}>
-          <span className="brand-mark" aria-hidden="true" />
+          <span className="brand-mark" aria-hidden="true">
+            <Icon name="sun" />
+          </span>
           <span>{t(language, "appName")}</span>
         </button>
         <div className="top-actions">
           <button className="chip" type="button" onClick={() => updateSettings({ language: language === "en" ? "zh" : "en" })}>
             {language === "en" ? "中文" : "EN"}
           </button>
-          <button className="icon-button" type="button" onClick={() => setPage("settings")} aria-label={t(language, "settings")}>
-            <span aria-hidden="true">⚙</span>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => updateSettings({ theme: settings.theme === "dark" ? "light" : "dark" })}
+            aria-label={t(language, "theme")}
+          >
+            <Icon name={settings.theme === "dark" ? "sun" : "moon"} />
           </button>
         </div>
       </header>
 
       <main>
-        {error ? <div className="banner" role="alert">{errorText(language, error)}</div> : null}
+        {error ? (
+          <div className={`banner ${error === "showingCached" || error === "offline" ? "warn" : ""}`} role="alert">
+            <span>
+              {error === "showingCached" && weather
+                ? t(language, "showingCached", { time: formatTime(new Date(weather.fetchedAt), language) })
+                : errorText(language, error)}
+            </span>
+            {location && page === "home" && error !== "invalidLocationData" ? (
+              <button type="button" onClick={() => void refreshWeather()} disabled={isWeatherLoading}>
+                {t(language, "retry")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {notice ? <div className="banner subtle" role="status">{notice}</div> : null}
 
         {page === "home" && !location ? (
@@ -353,7 +460,8 @@ function App() {
             locationName={formatLocation(location, language)}
             log={todayLog}
             now={now}
-            isStale={isStale}
+            currentUv={currentUv}
+            uvIsEstimate={uvIsEstimate}
             recommendation={recommendation}
             settings={settings}
             weather={weather}
@@ -394,15 +502,24 @@ function App() {
       </main>
 
       <nav className="tabbar" aria-label="Primary">
-        <button className={page === "home" ? "active" : ""} type="button" onClick={() => setPage("home")}>
-          {t(language, "home")}
-        </button>
-        <button className={page === "location" ? "active" : ""} type="button" onClick={() => setPage("location")}>
-          {t(language, "location")}
-        </button>
-        <button className={page === "settings" ? "active" : ""} type="button" onClick={() => setPage("settings")}>
-          {t(language, "settings")}
-        </button>
+        {(
+          [
+            ["home", "sun"],
+            ["location", "pin"],
+            ["settings", "sliders"]
+          ] as const
+        ).map(([target, icon]) => (
+          <button
+            className={page === target ? "active" : ""}
+            key={target}
+            type="button"
+            aria-current={page === target ? "page" : undefined}
+            onClick={() => setPage(target)}
+          >
+            <Icon name={icon} />
+            <span>{t(language, target)}</span>
+          </button>
+        ))}
       </nav>
     </div>
   );
@@ -410,7 +527,8 @@ function App() {
 
 interface HomePageProps {
   now: Date;
-  isStale: boolean;
+  currentUv: number | null;
+  uvIsEstimate: boolean;
   activeButtonLabel: string;
   exposure: ExposureContext;
   isLocating: boolean;
@@ -430,7 +548,8 @@ interface HomePageProps {
 
 function HomePage({
   now,
-  isStale,
+  currentUv,
+  uvIsEstimate,
   activeButtonLabel,
   exposure,
   isLocating,
@@ -447,53 +566,82 @@ function HomePage({
   onRefresh,
   onUpdateExposure
 }: HomePageProps) {
+  const hasUv = currentUv !== null;
+  const isFirstLoad = isWeatherLoading && !weather;
+  const status = weather
+    ? t(language, uvIsEstimate ? "estimatedFrom" : "updatedAt", { time: formatTime(new Date(weather.fetchedAt), language) })
+    : t(language, isWeatherLoading ? "loadingWeather" : "awaitingData");
+
   return (
     <div className="page home-page">
-      <section className={`result-panel ${riskClass(recommendation.risk)}`}>
+      <section className={`result-panel ${riskClass(hasUv ? recommendation.risk : "unknown")}`} aria-busy={isWeatherLoading}>
         <div className="result-meta">
           <button className="location-pill" type="button" onClick={onChangeLocation}>
-            {isLocating ? t(language, "loadingLocation") : locationName}
+            <Icon name="pin" />
+            <span>{isLocating ? t(language, "loadingLocation") : locationName}</span>
           </button>
-          <span>{isWeatherLoading ? t(language, "loadingWeather") : weatherText(language, weather?.weatherCode ?? null)}</span>
+          <span className="weather-pill">
+            {weather ? (
+              <>
+                {weatherText(language, weather.weatherCode)}
+                {weather.temperatureC !== null ? <strong>{formatTemp(weather.temperatureC)}</strong> : null}
+              </>
+            ) : (
+              "--"
+            )}
+          </span>
         </div>
-        <p className="hero-eyebrow">{t(language, "dailyCompanion")}</p>
-        <h1>{isWeatherLoading ? t(language, "loadingWeather") : isStale || weather?.uvIndex == null ? t(language, "waitingUv") : conclusionText(language, recommendation)}</h1>
-        <div className="risk-line">
-          <span className="risk-dot" aria-hidden="true" />
-          <span>{isStale || weather?.uvIndex == null ? t(language, "dataUnavailable") : riskText(language, recommendation.risk)}</span>
-        </div>
-        <div className="metric-grid">
-          <div>
-            <span>{t(language, "uvIndex")}</span>
-            <strong>{isStale || weather?.uvIndex == null ? "--" : weather.uvIndex.toFixed(1)}</strong>
+
+        <div className="hero-body">
+          <UvDial uv={currentUv} language={language} loading={isFirstLoad} />
+          <div className="hero-copy">
+            <h1>{isFirstLoad ? t(language, "loadingWeather") : hasUv ? conclusionText(language, recommendation) : t(language, "waitingUv")}</h1>
+            <div className="risk-line">
+              <span className="risk-dot" aria-hidden="true" />
+              <span>{hasUv ? riskText(language, recommendation.risk) : t(language, "dataUnavailable")}</span>
+            </div>
+            <p className="reason">{reasonText(language, recommendation.reason)}</p>
           </div>
-          <div>
-            <span>{t(language, "weather")}</span>
-            <strong>{formatTemp(weather?.temperatureC ?? null)}</strong>
-          </div>
         </div>
-        <p className="data-status" role="status">{weather ? t(language, isStale ? "staleData" : "updatedAt", { time: formatTime(new Date(weather.fetchedAt), language) }) : t(language, "awaitingData")}</p>
-        <p>{reasonText(language, recommendation.reason)}</p>
-        <div className="next-action">
-          <span>{t(language, "next")}</span>
-          <strong>{isStale || weather?.uvIndex == null ? t(language, "checkForecast") : actionText(language, recommendation.nextAction)}</strong>
-        </div>
-        {recommendation.reapplyAt ? (
-          <div className="countdown">
-            {recommendation.minutesUntilReapply !== undefined && recommendation.minutesUntilReapply > 0
-              ? t(language, "reapplyIn", { minutes: recommendation.minutesUntilReapply })
-              : t(language, "alreadyDue")}
-            <span>{t(language, "reapplyAt", { time: formatTime(recommendation.reapplyAt, language) })}</span>
+
+        <div className="hero-footer">
+          <div className="next-action">
+            <span>{t(language, "next")}</span>
+            <strong>{hasUv ? actionText(language, recommendation.nextAction) : t(language, "checkForecast")}</strong>
           </div>
-        ) : null}
+          {recommendation.reapplyAt ? (
+            <div className="countdown">
+              <span>{t(language, "reapplyAt", { time: formatTime(recommendation.reapplyAt, language) })}</span>
+              <strong>
+                {recommendation.minutesUntilReapply !== undefined && recommendation.minutesUntilReapply > 0
+                  ? t(language, "reapplyIn", { minutes: recommendation.minutesUntilReapply })
+                  : t(language, "alreadyDue")}
+              </strong>
+            </div>
+          ) : null}
+        </div>
+        <p className="data-status" role="status">
+          {isWeatherLoading && weather ? <span className="pulse" aria-hidden="true" /> : null}
+          {isWeatherLoading && weather ? t(language, "refreshing") : status}
+          {weather?.uvSource === "airQuality" ? ` · ${t(language, "uvFromBackup")}` : ""}
+        </p>
       </section>
 
       <div className="action-row">
         <button className="primary-action" type="button" onClick={onRecord}>
-          {activeButtonLabel}
+          <Icon name="drop" />
+          <span>{activeButtonLabel}</span>
         </button>
-        <button className="secondary-action" type="button" onClick={onRefresh} disabled={isWeatherLoading} aria-busy={isWeatherLoading}>
-          {t(language, "refresh")}
+        <button
+          className={`secondary-action ${isWeatherLoading ? "is-loading" : ""}`}
+          type="button"
+          onClick={onRefresh}
+          disabled={isWeatherLoading}
+          aria-busy={isWeatherLoading}
+          aria-label={t(language, "refresh")}
+        >
+          <Icon name="refresh" />
+          <span>{t(language, "refresh")}</span>
         </button>
       </div>
 
@@ -536,19 +684,21 @@ function HomePage({
           aria-pressed={exposure.sweatingOrSwimming}
           onClick={() => onUpdateExposure({ sweatingOrSwimming: !exposure.sweatingOrSwimming })}
         >
-          {exposure.sweatingOrSwimming ? t(language, "sweat") : t(language, "noSweat")}
+          <span className="toggle-knob" aria-hidden="true" />
+          <span>{t(language, "sweat")}</span>
         </button>
       </section>
 
-      <DailyUvPlan exposure={exposure} language={language} settings={settings} weather={isStale ? null : weather} now={now} />
+      <DailyUvPlan exposure={exposure} language={language} settings={settings} weather={weather} now={now} />
 
-      <UvTrend language={language} weather={isStale ? null : weather} now={now} />
+      <UvTrend language={language} weather={weather} now={now} />
 
       <section className="history-panel">
         <div className="section-heading">
           <h2>{t(language, "history")}</h2>
           <button type="button" onClick={onAddFavorite}>
-            {t(language, "saveFavorite")}
+            <Icon name="star" />
+            <span>{t(language, "saveFavorite")}</span>
           </button>
         </div>
         <Timeline language={language} log={log} />
@@ -556,6 +706,84 @@ function HomePage({
 
       <footer className="tiny-footer">{t(language, "attribution")}</footer>
     </div>
+  );
+}
+
+const UV_DIAL_MAX = 12;
+const UV_DIAL_BANDS: Array<{ band: UvBand; from: number; to: number }> = [
+  { band: "low", from: 0, to: 3 },
+  { band: "moderate", from: 3, to: 6 },
+  { band: "high", from: 6, to: 8 },
+  { band: "veryHigh", from: 8, to: 11 },
+  { band: "extreme", from: 11, to: UV_DIAL_MAX }
+];
+
+function UvDial({ uv, language, loading }: { uv: number | null; language: Language; loading: boolean }) {
+  const radius = 84;
+  const center = { x: 100, y: 100 };
+  const point = (value: number) => {
+    const angle = Math.PI * (1 - Math.min(Math.max(value, 0), UV_DIAL_MAX) / UV_DIAL_MAX);
+    return { x: center.x + radius * Math.cos(angle), y: center.y - radius * Math.sin(angle) };
+  };
+  const arc = (from: number, to: number) => {
+    const start = point(from);
+    const end = point(to);
+    return `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${radius} ${radius} 0 0 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}`;
+  };
+  const band = uv === null ? null : getUvBand(uv);
+  const marker = uv === null ? null : point(uv);
+
+  return (
+    <div className={`uv-dial ${band ? `dial-${band}` : "dial-empty"} ${loading ? "is-loading" : ""}`}>
+      <svg viewBox="0 0 200 112" role="img" aria-label={uv === null ? t(language, "dataUnavailable") : `${t(language, "uvIndex")} ${uv.toFixed(1)}`}>
+        {UV_DIAL_BANDS.map((segment) => (
+          <path
+            className={`dial-band uv-${segment.band} ${band === segment.band ? "is-active" : ""}`}
+            d={arc(segment.from + 0.12, segment.to - 0.12)}
+            key={segment.band}
+          />
+        ))}
+        {marker ? <circle className="dial-marker" cx={marker.x} cy={marker.y} r="9" /> : null}
+      </svg>
+      <div className="dial-readout" aria-hidden="true">
+        <strong>{loading ? "…" : uv === null ? "--" : uv.toFixed(1)}</strong>
+        <span>{band ? t(language, `bandName_${band}`) : t(language, "uvIndex")}</span>
+      </div>
+    </div>
+  );
+}
+
+type IconName = "sun" | "moon" | "pin" | "sliders" | "refresh" | "drop" | "star";
+
+function Icon({ name }: { name: IconName }) {
+  const paths: Record<IconName, React.ReactNode> = {
+    sun: (
+      <>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4" />
+      </>
+    ),
+    moon: <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" />,
+    pin: (
+      <>
+        <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z" />
+        <circle cx="12" cy="10" r="2.3" />
+      </>
+    ),
+    sliders: <path d="M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4" />,
+    refresh: (
+      <>
+        <path d="M20 12a8 8 0 1 1-2.35-5.65" />
+        <path d="M20 4v4.5h-4.5" />
+      </>
+    ),
+    drop: <path d="M12 3.5s6 6.4 6 10.5a6 6 0 0 1-12 0c0-4.1 6-10.5 6-10.5Z" />,
+    star: <path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6L12 4Z" />
+  };
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {paths[name]}
+    </svg>
   );
 }
 
@@ -687,13 +915,15 @@ function UvTrend({ language, weather, now }: { language: Language; weather: Weat
               hour: "2-digit",
               timeZone: weather?.timezone
             }).format(new Date(point.time));
+            const pointStart = new Date(point.time).getTime();
+            const isNow = pointStart <= now.getTime() && now.getTime() < pointStart + HOUR_MS;
             return (
-              <div className="uv-bar" key={point.time} role="listitem" aria-label={`${formatTime(new Date(point.time), language, weather?.timezone, true)}: ${uv === null ? t(language, "dataUnavailable") : `UV ${uv.toFixed(1)}`}`}>
+              <div className={`uv-bar ${isNow ? "is-now" : ""}`} key={point.time} role="listitem" aria-label={`${formatTime(new Date(point.time), language, weather?.timezone, true)}: ${uv === null ? t(language, "dataUnavailable") : `UV ${uv.toFixed(1)}`}`}>
                 <small className="uv-value">{uv === null ? "—" : uv.toFixed(1)}</small>
                 <div className="uv-bar-track">
                   <span className={`uv-fill uv-${uv === null ? "missing" : getUvBand(uv)}`} style={{ height: `${Math.max(8, ((uv ?? 0) / maxUv) * 100)}%` }} />
                 </div>
-                <small className="uv-hour">{hour}</small>
+                <small className="uv-hour">{isNow ? t(language, "now") : hour}</small>
               </div>
             );
           })}

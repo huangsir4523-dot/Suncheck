@@ -159,14 +159,78 @@ describe("Open-Meteo provider hardening", () => {
     expect(weather.hourlyUv).toEqual([{ time: "2026-09-30T04:00:00.000Z", uvIndex: 5 }]);
   });
 
-  it("aborts a stalled weather request after ten seconds", async () => {
+  it("retries a stalled weather request, then tries the backup UV source before giving up", async () => {
     vi.useFakeTimers();
-    vi.stubGlobal("fetch", vi.fn((_url, options) => new Promise((_resolve, reject) => {
-      options.signal.addEventListener("abort", () => reject(new Error("aborted")));
-    })));
+    const fetchMock = vi.fn((_url: URL, options: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
     const request = fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
     const assertion = expect(request).rejects.toThrow("aborted");
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(8_000 + 700 + 12_000 + 10_000);
     await assertion;
+    const hosts = fetchMock.mock.calls.map((call) => new URL(String(call[0])).hostname);
+    expect(hosts).toEqual(["api.open-meteo.com", "api.open-meteo.com", "air-quality-api.open-meteo.com"]);
+  });
+
+  it("recovers when the first weather attempt fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T04:30:00Z"));
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(jsonResponse({ hourly: { time: ["2026-09-30T04:00:00Z"], uv_index: [6.1] } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
+    await vi.advanceTimersByTimeAsync(700);
+    const weather = await request;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(weather.uvIndex).toBe(6.1);
+    expect(weather.uvSource).toBe("forecast");
+  });
+
+  it("does not retry a request the server rejected as invalid", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 400, json: async () => ({}) }) as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(searchCities("Paris", "en")).rejects.toThrow("Request failed: 400");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the air-quality UV forecast when the main forecast is down", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T04:30:00Z"));
+    const fetchMock = vi.fn(async (url: URL) =>
+      String(url).includes("air-quality")
+        ? jsonResponse({ timezone: "Asia/Shanghai", hourly: { time: ["2026-09-30T04:00:00Z"], uv_index: [7.3] } })
+        : ({ ok: false, status: 503, json: async () => ({}) } as Response)
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
+    await vi.advanceTimersByTimeAsync(700);
+    const weather = await request;
+    expect(weather.uvIndex).toBe(7.3);
+    expect(weather.uvSource).toBe("airQuality");
+    expect(weather.timezone).toBe("Asia/Shanghai");
+    expect(weather.weatherCode).toBeNull();
+  });
+
+  it("fills missing forecast UV from the air-quality endpoint", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T04:30:00Z"));
+    vi.stubGlobal("fetch", vi.fn(async (url: URL) =>
+      String(url).includes("air-quality")
+        ? jsonResponse({ hourly: { time: ["2026-09-30T04:00:00Z"], uv_index: [3.4] } })
+        : jsonResponse({ current: { temperature_2m: 21, weather_code: 1 }, hourly: { time: ["2026-09-30T04:00:00Z"], uv_index: [null] } })
+    ));
+    const weather = await fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
+    expect(weather.uvIndex).toBe(3.4);
+    expect(weather.temperatureC).toBe(21);
+    expect(weather.uvSource).toBe("airQuality");
+  });
+
+  it("ignores a time zone the browser cannot use", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ timezone: "Not/AZone", hourly: { time: [], uv_index: [] } })));
+    const weather = await fetchWeather({ id: "test", name: "Test", latitude: 1, longitude: 1, source: "manual" });
+    expect(weather.timezone).toBeUndefined();
   });
 });

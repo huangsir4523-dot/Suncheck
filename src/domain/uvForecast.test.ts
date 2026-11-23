@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getUvBand, getUvForecastSummary } from "./uvForecast";
+import { getUvAt, getUvBand, getUvForecastSummary } from "./uvForecast";
 
 describe("UV forecast analysis", () => {
   it("separates nights and missing hours instead of joining them into one window", () => {
@@ -61,5 +61,16 @@ describe("UV forecast analysis", () => {
 
     expect(summary.peakUv).toBe(2.4);
     expect(summary.protectionStartAt).toBeUndefined();
+  });
+
+  it("reads the UV for the hour that contains the current time", () => {
+    const points = [
+      { time: "2026-09-30T03:00:00.000Z", uvIndex: 2.5 },
+      { time: "2026-09-30T04:00:00.000Z", uvIndex: 4.1 },
+      { time: "2026-09-30T05:00:00.000Z", uvIndex: null }
+    ];
+    expect(getUvAt(points, new Date("2026-09-30T04:59:00Z"))).toBe(4.1);
+    expect(getUvAt(points, new Date("2026-09-30T05:10:00Z"))).toBeNull();
+    expect(getUvAt(points, new Date("2026-09-30T07:00:00Z"))).toBeNull();
   });
 });
