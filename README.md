@@ -11,6 +11,14 @@ Suncheck is a mobile-first Web App / PWA that answers one daily question: do I n
 
 ## Open-source Research Notes
 
+### November 2026 reliability and design update
+
+- Weather requests retry once with a longer timeout, and non-retryable errors (most 4xx) fail fast. If the main forecast is down or returns no UV, Suncheck falls back to the UV forecast from Open-Meteo's independent air-quality (CAMS) endpoint.
+- The last successful forecast is saved per place (rounded coordinates) for up to 12 hours. It appears immediately on launch, stays on screen during refreshes and failed refreshes, and failed refreshes retry automatically after 20, 40 and 60 seconds.
+- When the last reading is more than an hour old, current UV comes from the saved hourly forecast for the current hour and is labelled as such. Returning to the app refreshes only data older than 10 minutes, so switching apps no longer blanks the screen.
+- The service worker no longer intercepts cross-origin API requests. Unknown time zones from the API or storage are discarded instead of crashing date formatting.
+- New look: a warm light/dark palette, a UV dial in the hero, icon tab bar, a "now" marker in the hourly chart, and a quick theme toggle.
+
 ### September 2026 usability update
 
 - The responsive dashboard now uses a calmer light/dark palette, smaller headings, explicit control selection, and a horizontally scrollable hourly UV chart with a legend. Missing UV samples are shown as a dash rather than zero.

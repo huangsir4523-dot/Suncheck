@@ -1,0 +1,31 @@
+{
+  "name": "Suncheck",
+  "short_name": "Suncheck",
+  "description": "A private mobile-first sunscreen and UV guidance PWA.",
+  "start_url": "/Suncheck/",
+  "scope": "/Suncheck/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f3ea",
+  "theme_color": "#f7f3ea",
+  "icons": [
+    {
+      "src": "/Suncheck/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/Suncheck/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/Suncheck/icons/suncheck-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
