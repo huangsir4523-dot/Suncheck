@@ -18,6 +18,7 @@ Suncheck is a mobile-first Web App / PWA that answers one daily question: do I n
 - When the last reading is more than an hour old, current UV comes from the saved hourly forecast for the current hour and is labelled as such. Returning to the app refreshes only data older than 10 minutes, so switching apps no longer blanks the screen.
 - The service worker no longer intercepts cross-origin API requests. Unknown time zones from the API or storage are discarded instead of crashing date formatting.
 - New look: a warm light/dark palette, a UV dial in the hero, icon tab bar, a "now" marker in the hourly chart, and a quick theme toggle.
+- Cache fixes: responses missing current UV retain usable cached advice and retry without overwriting the saved forecast. The hero and protection checklist share the same current-UV calculation, and expired forecasts show an explicit expiry message. Validated with 38 unit tests, a production build, and controlled Chrome checks for cache retention/reload, automatic recovery, missing UV without a cache, and Chinese/English expiry notices.
 
 ### September 2026 usability update
 

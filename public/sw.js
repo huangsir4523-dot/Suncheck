@@ -1,4 +1,4 @@
-const CACHE_NAME = "suncheck-shell-v3";
+const CACHE_NAME = "suncheck-shell-v4";
 const BASE_PATH = new URL(self.registration.scope).pathname;
 const assetUrl = (path) => `${BASE_PATH}${path.replace(/^\/+/, "")}`;
 const SHELL_ASSETS = [

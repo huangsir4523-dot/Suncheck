@@ -11,7 +11,8 @@ import {
   weatherText
 } from "./i18n";
 import { getSunscreenRecommendation } from "./domain/recommendation";
-import { getUvAt, getUvBand, getUvForecastSummary, type UvBand } from "./domain/uvForecast";
+import { getUvBand, getUvForecastSummary, type UvBand } from "./domain/uvForecast";
+import { getCurrentUv, getUsableWeather, selectWeatherAfterRefresh } from "./domain/weather";
 import {
   fetchWeather,
   locationFromGeolocation,
@@ -35,7 +36,6 @@ import {
   saveFavorites,
   saveLastLocation,
   saveSettings,
-  WEATHER_CACHE_MAX_AGE_MS,
   weatherKey
 } from "./services/storage";
 import { todayKey } from "./services/storage";
@@ -127,13 +127,9 @@ function App() {
   // Only show weather that belongs to the selected place.
   const placeWeather = location && weatherState?.key === weatherKey(location) ? weatherState.data : null;
   const weatherAge = placeWeather ? now.getTime() - new Date(placeWeather.fetchedAt).getTime() : Number.POSITIVE_INFINITY;
-  const isStale = !!placeWeather && weatherAge >= WEATHER_CACHE_MAX_AGE_MS;
-  const weather = isStale ? null : placeWeather;
-  // A fresh reading wins; otherwise use the hourly forecast for the current hour, which stays valid for hours.
-  const liveUv = weather && weatherAge < HOUR_MS ? weather.uvIndex : null;
-  const forecastUv = weather ? getUvAt(weather.hourlyUv, now) : null;
-  const currentUv = liveUv ?? forecastUv;
-  const uvIsEstimate = liveUv === null && currentUv !== null && weatherAge >= HOUR_MS;
+  const weather = getUsableWeather(placeWeather, now);
+  const currentUv = getCurrentUv(weather, now);
+  const uvIsEstimate = currentUv !== null && weatherAge >= HOUR_MS;
   const recommendation = useMemo(
     () =>
       getSunscreenRecommendation({
@@ -217,14 +213,19 @@ function App() {
       });
       const nextWeather = await fetchWeather(nextLocation);
       if (request !== weatherRequest.current) return;
-      const nextState = { key, data: nextWeather };
+      const checkedAt = new Date();
+      const selected = selectWeatherAfterRefresh(existing?.data ?? null, nextWeather, checkedAt);
+      const nextState = { key, data: selected };
       latestWeather.current = nextState;
       setWeatherState(nextState);
+      setNow(checkedAt);
+      if (getCurrentUv(nextWeather, checkedAt) === null) {
+        setError(selected !== nextWeather ? "showingCached" : "missingUv");
+        scheduleAutoRetry(nextLocation);
+        return;
+      }
       saveCachedWeather(nextLocation, nextWeather);
       autoRetries.current = 0;
-      const checkedAt = new Date();
-      setNow(checkedAt);
-      if (nextWeather.uvIndex === null && getUvAt(nextWeather.hourlyUv, checkedAt) === null) setError("missingUv");
       console.info("[Suncheck] UV/weather loaded", {
         uvIndex: nextWeather.uvIndex,
         uvSource: nextWeather.uvSource,
@@ -429,8 +430,10 @@ function App() {
         {error ? (
           <div className={`banner ${error === "showingCached" || error === "offline" ? "warn" : ""}`} role="alert">
             <span>
-              {error === "showingCached" && weather
-                ? t(language, "showingCached", { time: formatTime(new Date(weather.fetchedAt), language) })
+              {error === "showingCached"
+                ? weather
+                  ? t(language, "showingCached", { time: formatTime(new Date(weather.fetchedAt), language) })
+                  : t(language, "cacheExpired")
                 : errorText(language, error)}
             </span>
             {location && page === "home" && error !== "invalidLocationData" ? (
@@ -822,7 +825,7 @@ function protectionTips(
   now: Date
 ): string[] {
   const summary = getUvForecastSummary(weather?.hourlyUv ?? [], now);
-  const values = [weather?.uvIndex, summary.peakUv].filter((value): value is number => typeof value === "number");
+  const values = [getCurrentUv(weather, now), summary.peakUv].filter((value): value is number => typeof value === "number");
   if (values.length === 0) return ["protectionCheckLater"];
 
   const highestUv = Math.max(...values);

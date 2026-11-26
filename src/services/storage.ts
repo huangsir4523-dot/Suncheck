@@ -1,4 +1,5 @@
 import { detectLanguage } from "../i18n";
+import { getUsableWeather } from "../domain/weather";
 import {
   sanitizeDailyLog,
   sanitizeExposure,
@@ -14,8 +15,6 @@ const FAVORITES_KEY = "suncheck:favorites";
 const LOCATION_KEY = "suncheck:last-location";
 const LOG_PREFIX = "suncheck:log:";
 const WEATHER_KEY = "suncheck:weather";
-/** Hourly forecasts stay useful for a while, so a saved one can bridge a failed refresh. */
-export const WEATHER_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 export const defaultSettings: UserSettings = {
   language: detectLanguage(),
@@ -147,8 +146,7 @@ export function loadCachedWeather(location: SavedLocation, now = new Date()): We
   if (record.key !== weatherKey(location)) return null;
   const snapshot = sanitizeStoredWeather(record.snapshot);
   if (!snapshot) return null;
-  const age = now.getTime() - new Date(snapshot.fetchedAt).getTime();
-  return age >= 0 && age < WEATHER_CACHE_MAX_AGE_MS ? snapshot : null;
+  return getUsableWeather(snapshot, now);
 }
 
 export function saveCachedWeather(location: SavedLocation, snapshot: WeatherSnapshot): void {
